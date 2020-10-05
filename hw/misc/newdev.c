@@ -312,6 +312,26 @@ static void connected_handle_read(void *opaque){
                 CPU_FREE(set);   
                 return;
             }
+        case PIN_ON_SAME:
+            {                            
+                cpu_set_t *set;                
+                CPUState* cpu;
+                int vCPU_count=0;
+                set = CPU_ALLOC(MAX_CPU);
+                CPU_SET_S(0, SET_SIZE, set);    //static pin on pCPU0
+
+                cpu = qemu_get_cpu(vCPU_count);
+                while(cpu != NULL){
+                    DBG("cpu #%d[%d]\tthread id:%d\t PIN_ON_SAME [pcpu#%d]", vCPU_count, cpu->cpu_index, cpu->thread_id, 0);
+                    if (sched_setaffinity(cpu->thread_id, SET_SIZE, set) == -1){
+                        DBG("error sched_setaffinity");
+                    } 
+                    vCPU_count += 1;
+                    cpu = qemu_get_cpu(vCPU_count);   
+                }  
+                CPU_FREE(set);   
+                return;
+            }
         default:
             //unexpected value is threated like an error 
             return;            
@@ -505,45 +525,72 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
             newdev->buf[index] = 0;
             break;
         case 3:
+            // {
+            //     int vCPU_count=0;
+            //     int i;
+            //     int count_cpu = 0;
+            //     int which_cpu = -1;
+            //     int selected_cpu_thread_id = -1;
+            //     uint64_t value = val;                
+            //     cpu_set_t *set;                
+            //     CPUState* cpu;
+
+            //     set = CPU_ALLOC(MAX_CPU);
+            //     memcpy(set, &value, SET_SIZE);
+            //     for(i=0; i<MAX_CPU; i++){
+            //         if(CPU_ISSET_S(i, SET_SIZE, set)){
+            //             count_cpu++;
+            //             which_cpu = i;
+            //             printf("IN THE CPU_SET, cpu %d is set\n", i);
+            //         }
+            //     }
+
+            //     cpu = qemu_get_cpu(vCPU_count);
+            //     while(cpu != NULL){
+            //         if(which_cpu == vCPU_count){
+            //             selected_cpu_thread_id = cpu->thread_id;
+            //         }
+            //         DBG("cpu #%d[%d]\tthread id:%d", vCPU_count, cpu->cpu_index, cpu->thread_id);
+            //         vCPU_count++;
+            //         cpu = qemu_get_cpu(vCPU_count);                
+            //     }
+            //     DBG("Guest has %d vCPUS", vCPU_count);
+            //     DBG("#pCPU: %u", get_nprocs()); //assuming NON hotpluggable cpus
+            //     DBG("#vCPU: %u", vCPU_count);            
+
+            //     DBG("---IOCTL_SCHED_SETAFFINITY triggered this.\nCall sched_setaffinity to bind vCPU%d(thread id %d) to pCPU%d", which_cpu, selected_cpu_thread_id, which_cpu);
+            //     if(count_cpu == 1){
+            //         if (sched_setaffinity(selected_cpu_thread_id, SET_SIZE, set) == -1){
+            //             DBG("error sched_setaffinity");
+            //         }                    
+            //     }
+
+            //     CPU_FREE(set);
+            //     break;
+            // }
             {
                 int vCPU_count=0;
-                int i;
-                int count_cpu = 0;
-                int which_cpu = -1;
-                int selected_cpu_thread_id = -1;
                 uint64_t value = val;                
                 cpu_set_t *set;                
                 CPUState* cpu;
 
                 set = CPU_ALLOC(MAX_CPU);
                 memcpy(set, &value, SET_SIZE);
-                for(i=0; i<MAX_CPU; i++){
-                    if(CPU_ISSET_S(i, SET_SIZE, set)){
-                        count_cpu++;
-                        which_cpu = i;
-                        printf("IN THE CPU_SET, cpu %d is set\n", i);
-                    }
-                }
 
                 cpu = qemu_get_cpu(vCPU_count);
                 while(cpu != NULL){
-                    if(which_cpu == vCPU_count){
-                        selected_cpu_thread_id = cpu->thread_id;
-                    }
                     DBG("cpu #%d[%d]\tthread id:%d", vCPU_count, cpu->cpu_index, cpu->thread_id);
+                    if(CPU_ISSET_S(vCPU_count, SET_SIZE, set)){
+                        if (sched_setaffinity(cpu->thread_id, SET_SIZE, set) == -1){
+                            DBG("error sched_setaffinity");
+                        }                          
+                        DBG("---IOCTL_SCHED_SETAFFINITY triggered this.\nCall sched_setaffinity to bind vCPU%d(thread %d) to pCPU%d", vCPU_count, cpu->thread_id, vCPU_count);
+                    }
                     vCPU_count++;
                     cpu = qemu_get_cpu(vCPU_count);                
-                }
-                DBG("Guest has %d vCPUS", vCPU_count);
+                }                
                 DBG("#pCPU: %u", get_nprocs()); //assuming NON hotpluggable cpus
                 DBG("#vCPU: %u", vCPU_count);            
-
-                DBG("---IOCTL_SCHED_SETAFFINITY triggered this.\nCall sched_setaffinity to bind vCPU%d(thread id %d) to pCPU%d", which_cpu, selected_cpu_thread_id, which_cpu);
-                if(count_cpu == 1){
-                    if (sched_setaffinity(selected_cpu_thread_id, SET_SIZE, set) == -1){
-                        DBG("error sched_setaffinity");
-                    }                    
-                }
 
                 CPU_FREE(set);
                 break;

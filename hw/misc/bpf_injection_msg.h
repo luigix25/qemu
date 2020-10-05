@@ -22,6 +22,7 @@
 #define SHUTDOWN_REQUEST					15
 #define ERROR								16
 #define RESET								17
+#define PIN_ON_SAME							18
 /* version defines */
 #define DEFAULT_VERSION 					1
 
