@@ -39,7 +39,6 @@ struct bpf_injection_msg_t;
 struct bpf_injection_msg_t prepare_bpf_injection_message(const char* path);	
 void print_bpf_injection_message(struct bpf_injection_msg_header myheader);
 
-
 struct bpf_injection_msg_header {
 	uint8_t version;		//version of the protocol
 	uint8_t type;			//what kind of payload is carried
