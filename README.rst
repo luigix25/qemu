@@ -2,6 +2,9 @@
 QEMU README
 ===========
 
+To build my device when make in build/ do:
+  make all -j 9 CONFIG_NEWDEV=y
+
 QEMU is a generic and open source machine & userspace emulator and
 virtualizer.
 
