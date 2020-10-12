@@ -16,13 +16,14 @@
 
 /* type defines */
 #define PROGRAM_INJECTION 					1
-#define PROGRAM_INJECTION_RESULT 			2
-#define PROGRAM_INJECTION_AFFINITY 			3
-#define PROGRAM_INJECTION_AFFINITY_RESULT	4
+#define PROGRAM_INJECTION_RESULT 				2
+#define PROGRAM_INJECTION_AFFINITY 				3
+#define PROGRAM_INJECTION_AFFINITY_RESULT			4
 #define SHUTDOWN_REQUEST					15
-#define ERROR								16
-#define RESET								17
-#define PIN_ON_SAME							18
+#define ERROR							16
+#define RESET							17
+#define PIN_ON_SAME						18
+#define HT_REMAPPING						19
 /* version defines */
 #define DEFAULT_VERSION 					1
 
@@ -70,7 +71,7 @@ struct bpf_injection_msg_t prepare_bpf_injection_message(const char* path){
 	  	fseek(fp, 0 , SEEK_SET);// needed for next read from beginning of file
 	  	mymsg.payload = malloc(mymsg.header.payload_len);
 	  	len = fread(mymsg.payload, 1, mymsg.header.payload_len, fp);
-	  	printf("readlen %d\n", len);
+	  	// printf("readlen %d\n", len);
 	  	if(len != mymsg.header.payload_len) {
 	  		printf("Error preparing the message\n");
 	  		mymsg.header.type = ERROR;

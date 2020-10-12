@@ -157,10 +157,10 @@ typedef struct {
     QemuMutex thr_mutex;
     QemuCond thr_cond;
     bool stopping;
-
     uint32_t irq_status;
 
 
+    bool hyperthreading_remapping; 
     
     int listen_fd;  //listening socket fd
     int connect_fd; //connected socket fd (use for command exchange)
@@ -169,6 +169,38 @@ typedef struct {
 
 static void newdev_raise_irq(NewdevState *newdev, uint32_t val);
 static void connected_handle_read(void *opaque);
+int map_hyperthread(cpu_set_t* set);
+
+
+int map_hyperthread(cpu_set_t* set){
+    //Modifies cpu_set only if one cpu is set in 
+    int i=0;
+    int setCount=0;
+    int settedCpu;
+    int remappedCpu = -1;
+    for(i=0; i<MAX_CPU; i++){
+        if(CPU_ISSET_S(i, SET_SIZE, set)){
+            setCount++;
+            settedCpu = i;
+        }
+    }
+    if(setCount == 1){
+        CPU_ZERO_S(SET_SIZE, set);
+        if(settedCpu%2 == 0){
+            remappedCpu = settedCpu / 2;
+        }
+        else{
+            remappedCpu = (get_nprocs()/2) + (settedCpu / 2);
+        }
+        CPU_SET_S(remappedCpu, SET_SIZE, set);
+
+        DBG("map_hyperthread [guest] %d -> %d [host]", settedCpu, remappedCpu);
+    }
+    else{
+        DBG("map_hyperthread no if");
+    }
+    return remappedCpu;
+}
 
 static void accept_handle_read(void *opaque){
     NewdevState *newdev = opaque;
@@ -310,7 +342,7 @@ static void connected_handle_read(void *opaque){
                     cpu = qemu_get_cpu(vCPU_count);   
                 }  
                 CPU_FREE(set);   
-                return;
+                break;
             }
         case PIN_ON_SAME:
             {                            
@@ -330,7 +362,12 @@ static void connected_handle_read(void *opaque){
                     cpu = qemu_get_cpu(vCPU_count);   
                 }  
                 CPU_FREE(set);   
-                return;
+                break;
+            }
+        case HT_REMAPPING:
+            {                            
+                newdev->hyperthreading_remapping = !newdev->hyperthreading_remapping;
+                DBG("HT_REMAPPING: %d", newdev->hyperthreading_remapping);
             }
         default:
             //unexpected value is threated like an error 
@@ -575,16 +612,21 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
                 CPUState* cpu;
 
                 set = CPU_ALLOC(MAX_CPU);
-                memcpy(set, &value, SET_SIZE);
+                memcpy(set, &value, SET_SIZE);                
 
                 cpu = qemu_get_cpu(vCPU_count);
                 while(cpu != NULL){
                     DBG("cpu #%d[%d]\tthread id:%d", vCPU_count, cpu->cpu_index, cpu->thread_id);
                     if(CPU_ISSET_S(vCPU_count, SET_SIZE, set)){
+                        int remap = vCPU_count;
+                        if(newdev->hyperthreading_remapping == true){                            
+                            remap = map_hyperthread(set);   //if 1 cpu is set then remap, otherwise do nothing
+                        }
                         if (sched_setaffinity(cpu->thread_id, SET_SIZE, set) == -1){
                             DBG("error sched_setaffinity");
                         }                          
-                        DBG("---IOCTL_SCHED_SETAFFINITY triggered this.\nCall sched_setaffinity to bind vCPU%d(thread %d) to pCPU%d", vCPU_count, cpu->thread_id, vCPU_count);
+
+                        DBG("---IOCTL_SCHED_SETAFFINITY triggered this.\nCall sched_setaffinity to bind vCPU%d(thread %d) to pCPU%d", vCPU_count, cpu->thread_id, remap);
                     }
                     vCPU_count++;
                     cpu = qemu_get_cpu(vCPU_count);                
@@ -687,6 +729,9 @@ static void newdev_realize(PCIDevice *pdev, Error **errp)
     //set_fd_handler?
     newdev->listen_fd = -1;
     newdev->connect_fd = -1;
+
+    //setup ht (default=disabled)
+    newdev->hyperthreading_remapping = false;
 
     newdev->listen_fd = make_socket(9999);
     if (newdev->listen_fd < 0){
