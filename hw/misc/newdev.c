@@ -47,6 +47,7 @@
 #include <sched.h>
 #define MAX_CPU 64
 #define SET_SIZE CPU_ALLOC_SIZE(64)
+#define NEWDEV_DEVICE_ID 0x11ea
 
 /* Debug information. Define it as 1 get for basic debugging,
  * and as 2 to get additional (verbose) memory listener logs. */
@@ -675,7 +676,7 @@ static void newdev_class_init(ObjectClass *class, void *data)
     k->realize = newdev_realize;
     k->exit = newdev_uninit;
     k->vendor_id = PCI_VENDOR_ID_QEMU;
-    k->device_id = 0x11ea;
+    k->device_id = NEWDEV_DEVICE_ID;
     
     k->class_id = PCI_CLASS_OTHERS;
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
