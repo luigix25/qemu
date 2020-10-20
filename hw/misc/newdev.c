@@ -1,7 +1,6 @@
 /*
- * QEMU educational PCI device
- *
- * Copyright (c) 2012-2015 Jiri Slaby
+ * QEMU extensible paravirtualization device
+ * 2020 Giacomo Pellicci
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -74,16 +73,8 @@
 
 //not used, misleading. OLD used only in ioregs R/W
 #define NEWDEV_REG_STATUS_IRQ   0
-#define NEWDEV_REG_CTRL         4
 #define NEWDEV_REG_RAISE_IRQ    8
 #define NEWDEV_REG_LOWER_IRQ    12
-
-/* What's really used in this device!
-*
-* 0 for NEWDEV_REG_STATUS_IRQ [read] it's 0/sizeof(uint32_t)
-* 0 for NEWDEV_REG_RAISE_IRQ [write] it's 0/sizeof(uint32_t)
-* 1 for NEWDEV_REG_LOWER_IRQ [write] it's 4/sizeof(uint32_t)
-*/
 
 // DEVICE BUFMMIO STRUCTURE. OFFSET IN #bytes/sizeof(uint32_t)
 
@@ -108,38 +99,13 @@
 // +---+--------------------------------+
 
 
-#define FACT_IRQ        0x00000001
-#define DMA_IRQ         0x00000100
 
-#define DMA_START       0x40000
-#define DMA_SIZE        4096
-
-#define BUF_LEN         500
 
 static const char *regnames[] = {
     "STATUS",
     "CTRL",
     "RAISE_IRQ",
     "LOWER_IRQ",
-    "NUM_RX_QUEUES",
-    "NUM_TX_QUEUES",
-    "NUM_RX_BUFS",
-    "NUM_TX_BUFS",
-    "RX_CTX_SIZE",
-    "TX_CTX_SIZE",
-    "DOORBELL_SIZE",
-    "QUEUE_SELECT",
-    "CTX_PADDR_LO",
-    "CTX_PADDR_HI",
-    "PROG_SELECT",
-    "PROG_SIZE",
-    "DOORBELL_GVA_LO",
-    "DOORBELL_GVA_HI",
-    "VERSION",
-    "FEATURES",
-    "DUMP_LEN",
-    "DUMP_INPUT",
-    "DUMP_OFS",
 };
 
 typedef struct {
@@ -194,10 +160,7 @@ int map_hyperthread(cpu_set_t* set){
         }
         CPU_SET_S(remappedCpu, SET_SIZE, set);
 
-        DBG("map_hyperthread [guest] %d -> %d [host]", settedCpu, remappedCpu);
-    }
-    else{
-        DBG("map_hyperthread no if");
+        // DBG("map_hyperthread [guest] %d -> %d [host]", settedCpu, remappedCpu);
     }
     return remappedCpu;
 }
@@ -256,7 +219,7 @@ static void connected_handle_read(void *opaque){
     myheader = (struct bpf_injection_msg_header*) newdev->buf + 4;
     print_bpf_injection_message(*myheader);   
 
-    // Receive message payload. Place it in newdev->buf + 4*sizeof(uint32_t) + sizeof(struct bpf_injection_msg_header)/sizeof(uint32_t)
+    // Receive message payload. Place it in newdev->buf + 4 + sizeof(struct bpf_injection_msg_header)/sizeof(uint32_t)
     // All those manipulation is because newdev->buf is a pointer to uint32_t so you have to provide offset in bytes/4 or in uint32_t
     len = recv(newdev->connect_fd, newdev->buf + 4 + sizeof(struct bpf_injection_msg_header)/sizeof(uint32_t), myheader->payload_len, 0);
     // DBG("payload received of len: %d bytes", len);
@@ -374,32 +337,6 @@ static void connected_handle_read(void *opaque){
             return;            
     }
 
-
-    //old with raw data, now i use header+payload
-    /*
-        len = recv(newdev->connect_fd, buf, 4, 0);
-    if(len <= 0){
-        DBG("len = %d [<=0] --> connection reset or error. Removing connect_fd, restoring listen_fd\n", len);
-        //connection closed[0] or error[<0]
-
-        //Remove connect_fd from watched fd in iothread select
-        qemu_set_fd_handler(newdev->connect_fd, NULL, NULL, NULL);
-        newdev->connect_fd = -1;
-
-        //Add listen_fd from list of watched fd in iothread select
-        qemu_set_fd_handler(newdev->listen_fd, accept_handle_read, NULL, newdev);  
-        return;
-    }
-
-    buf[4] = '\0';
-    DBG("received %d characters. '%s'\n", len, buf);
-
-    if(strcmp(buf, "init") == 0){
-        DBG("INIT->");
-        newdev_raise_irq(newdev, 22);
-    }
-    */
-
     return;
 }
 
@@ -434,8 +371,6 @@ static uint64_t newdev_io_read(void *opaque, hwaddr addr, unsigned size){
         DBG("Unknown I/O read, addr=0x%08"PRIx64, addr);
         return 0;
     }
-
-    // assert(index < ARRAY_SIZE(regnames));
 
     switch(addr){
         case NEWDEV_REG_STATUS_IRQ:
@@ -484,7 +419,6 @@ static void newdev_io_write(void *opaque, hwaddr addr, uint64_t val, unsigned si
 static uint64_t newdev_bufmmio_read(void *opaque, hwaddr addr, unsigned size){
     NewdevState *newdev = opaque;
     unsigned int index;
-    //if(system("cat ./shared/rare_string.txt; echo;") != 0){}
 
     addr = addr & NEWDEV_BUF_MASK;
     index = addr >> 2;
@@ -562,49 +496,6 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
             newdev->buf[index] = 0;
             break;
         case 3:
-            // {
-            //     int vCPU_count=0;
-            //     int i;
-            //     int count_cpu = 0;
-            //     int which_cpu = -1;
-            //     int selected_cpu_thread_id = -1;
-            //     uint64_t value = val;                
-            //     cpu_set_t *set;                
-            //     CPUState* cpu;
-
-            //     set = CPU_ALLOC(MAX_CPU);
-            //     memcpy(set, &value, SET_SIZE);
-            //     for(i=0; i<MAX_CPU; i++){
-            //         if(CPU_ISSET_S(i, SET_SIZE, set)){
-            //             count_cpu++;
-            //             which_cpu = i;
-            //             printf("IN THE CPU_SET, cpu %d is set\n", i);
-            //         }
-            //     }
-
-            //     cpu = qemu_get_cpu(vCPU_count);
-            //     while(cpu != NULL){
-            //         if(which_cpu == vCPU_count){
-            //             selected_cpu_thread_id = cpu->thread_id;
-            //         }
-            //         DBG("cpu #%d[%d]\tthread id:%d", vCPU_count, cpu->cpu_index, cpu->thread_id);
-            //         vCPU_count++;
-            //         cpu = qemu_get_cpu(vCPU_count);                
-            //     }
-            //     DBG("Guest has %d vCPUS", vCPU_count);
-            //     DBG("#pCPU: %u", get_nprocs()); //assuming NON hotpluggable cpus
-            //     DBG("#vCPU: %u", vCPU_count);            
-
-            //     DBG("---IOCTL_SCHED_SETAFFINITY triggered this.\nCall sched_setaffinity to bind vCPU%d(thread id %d) to pCPU%d", which_cpu, selected_cpu_thread_id, which_cpu);
-            //     if(count_cpu == 1){
-            //         if (sched_setaffinity(selected_cpu_thread_id, SET_SIZE, set) == -1){
-            //             DBG("error sched_setaffinity");
-            //         }                    
-            //     }
-
-            //     CPU_FREE(set);
-            //     break;
-            // }
             {
                 int vCPU_count=0;
                 uint64_t value = val;                
@@ -705,8 +596,6 @@ static void newdev_realize(PCIDevice *pdev, Error **errp)
         return;
     }
 
-    //timer_init_ms(&newdev->dma_timer, QEMU_CLOCK_VIRTUAL, newdev_dma_timer, newdev);
-
     qemu_mutex_init(&newdev->thr_mutex);
     qemu_cond_init(&newdev->thr_cond);
 
@@ -721,9 +610,6 @@ static void newdev_realize(PCIDevice *pdev, Error **errp)
     pci_register_bar(pdev, NEWDEV_BUF_PCI_BAR, PCI_BASE_ADDRESS_SPACE_MEMORY, &newdev->mmio);
 
     newdev->buf = malloc(NEWDEV_BUF_SIZE * sizeof(uint32_t));
-
-    /* Initialize device buffer */
-    // s->buf = g_malloc0(BUF_LEN);
     
 
     //set_fd_handler?
@@ -768,7 +654,6 @@ static void newdev_uninit(PCIDevice *pdev)
     qemu_cond_destroy(&newdev->thr_cond);
     qemu_mutex_destroy(&newdev->thr_mutex);
 
-    // timer_del(&newdev->dma_timer);
     msi_uninit(pdev);
 
 
@@ -791,22 +676,13 @@ static void newdev_class_init(ObjectClass *class, void *data)
     k->exit = newdev_uninit;
     k->vendor_id = PCI_VENDOR_ID_QEMU;
     k->device_id = 0x11ea;
-    // k->revision = 0x10;
+    
     k->class_id = PCI_CLASS_OTHERS;
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
-    // k->vmsd = &vmstate_newdev;
-    // k->props = newdev_properties;
 }
 
-static void newdev_instance_init(Object *obj)
-{
-    
-    //NewdevState *edu = NEWDEV(obj);
-
-    // edu->dma_mask = (1UL << 28) - 1;
-    // object_property_add_uint64_ptr(obj, "dma_mask",
-    //                                &edu->dma_mask, OBJ_PROP_FLAG_READWRITE,
-    //                                NULL);
+static void newdev_instance_init(Object *obj){    
+ 	return;
 }
 
 static void newdev_register_types(void)
