@@ -64,18 +64,11 @@
 #define TYPE_NEWDEV_DEVICE "newdev"
 #define NEWDEV(obj)        OBJECT_CHECK(NewdevState, obj, TYPE_NEWDEV_DEVICE)
 
-#define NEWDEV_REG_PCI_BAR      0
 #define NEWDEV_BUF_PCI_BAR      1
 #define NEWDEV_REG_END          92
 #define NEWDEV_REG_MASK         0xff
 #define NEWDEV_BUF_MASK         0xffff
 #define NEWDEV_BUF_SIZE         65536
-
-
-//not used, misleading. OLD used only in ioregs R/W
-#define NEWDEV_REG_STATUS_IRQ   0
-#define NEWDEV_REG_RAISE_IRQ    8
-#define NEWDEV_REG_LOWER_IRQ    12
 
 // DEVICE BUFMMIO STRUCTURE. OFFSET IN #bytes/sizeof(uint32_t)
 
@@ -99,19 +92,8 @@
 // |   |                                |
 // +---+--------------------------------+
 
-
-
-
-static const char *regnames[] = {
-    "STATUS",
-    "CTRL",
-    "RAISE_IRQ",
-    "LOWER_IRQ",
-};
-
 typedef struct {
     PCIDevice pdev;
-    MemoryRegion regs;
     MemoryRegion mmio;
 
     /* Storage for the I/O registers. */
@@ -341,7 +323,6 @@ static void connected_handle_read(void *opaque){
     return;
 }
 
-
 static void newdev_raise_irq(NewdevState *newdev, uint32_t val){
     newdev->irq_status |= val;
     DBG("raise irq\tirq_status=%x", newdev->irq_status);
@@ -358,63 +339,6 @@ static void newdev_lower_irq(NewdevState *newdev, uint32_t val){
         DBG("lower irq\tinside if");
         pci_set_irq(&newdev->pdev, 0);
     }
-}
-
-static uint64_t newdev_io_read(void *opaque, hwaddr addr, unsigned size){
-    NewdevState *newdev = opaque;
-    uint64_t val;
-    unsigned int index;
-
-    addr = addr & NEWDEV_REG_MASK;
-    index = addr >> 2;
-
-    if (addr >= NEWDEV_REG_END) {
-        DBG("Unknown I/O read, addr=0x%08"PRIx64, addr);
-        return 0;
-    }
-
-    switch(addr){
-        case NEWDEV_REG_STATUS_IRQ:
-            val = newdev->irq_status;
-            break;
-        default:
-            val = newdev->ioregs[index];
-            break;            
-    }
-
-    DBG("I/O read from %s, val=0x%08" PRIx64, regnames[index], val);
-
-    return val;
-}
-
-static void newdev_io_write(void *opaque, hwaddr addr, uint64_t val, unsigned size){
-    NewdevState *newdev = opaque;
-    unsigned int index;
-
-    addr = addr & NEWDEV_REG_MASK;
-    index = addr >> 2;
-
-    if (addr >= NEWDEV_REG_END) {
-        DBG("Unknown I/O write, addr=0x%08"PRIx64", val=0x%08"PRIx64,
-            addr, val);
-        return;
-    }
-
-    assert(index < ARRAY_SIZE(regnames));
-
-    DBG("I/O write to %s, val=0x%08" PRIx64, regnames[index], val);
-
-    switch(addr){
-        case NEWDEV_REG_RAISE_IRQ:
-            newdev_raise_irq(newdev, val);
-        case NEWDEV_REG_LOWER_IRQ:
-            newdev_lower_irq(newdev, val);
-            break;
-        default:            
-            newdev->ioregs[index] = val;
-            break;
-    }
-
 }
 
 static uint64_t newdev_bufmmio_read(void *opaque, hwaddr addr, unsigned size){
@@ -539,17 +463,6 @@ static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsign
 }
 
 
-static const MemoryRegionOps newdev_io_ops = {
-    .read = newdev_io_read,
-    .write = newdev_io_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
-    .impl = {
-        .min_access_size = 4,
-        .max_access_size = 4,
-    },
-
-};
-
 static const MemoryRegionOps newdev_bufmmio_ops = {
     .read = newdev_bufmmio_read,
     .write = newdev_bufmmio_write,
@@ -599,11 +512,6 @@ static void newdev_realize(PCIDevice *pdev, Error **errp)
 
     qemu_mutex_init(&newdev->thr_mutex);
     qemu_cond_init(&newdev->thr_cond);
-
-    /* Init I/O mapped memory region, exposing newdev registers. */
-    memory_region_init_io(&newdev->regs, OBJECT(newdev), &newdev_io_ops, newdev,
-                    "newdev-regs", NEWDEV_REG_MASK + 1);
-    pci_register_bar(pdev, NEWDEV_REG_PCI_BAR, PCI_BASE_ADDRESS_SPACE_MEMORY, &newdev->regs);
 
     /* Init memory mapped memory region, to expose eBPF programs. */
     memory_region_init_io(&newdev->mmio, OBJECT(newdev), &newdev_bufmmio_ops, newdev,
