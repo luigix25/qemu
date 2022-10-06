@@ -58,17 +58,25 @@
         fprintf(stderr, "newdev-pci: " fmt "\n", ## __VA_ARGS__); \
     } while (0)
 #else
-#define DBG(fmt, ...) do {} while (0)
+#define DBG(fmt, ...) 
 #endif
 
 #define TYPE_NEWDEV_DEVICE "newdev"
 #define NEWDEV(obj)        OBJECT_CHECK(NewdevState, obj, TYPE_NEWDEV_DEVICE)
 
-#define NEWDEV_BUF_PCI_BAR      1
-#define NEWDEV_REG_END          92
-#define NEWDEV_REG_MASK         0xff
-#define NEWDEV_BUF_MASK         0xffff
-#define NEWDEV_BUF_SIZE         65536
+#define NEWDEV_BUF_PCI_BAR       1
+
+/* Represents the number of rows */
+#define NEWDEV_REG_SIZE                 8
+#define NEWDEV_BUF_SIZE                 65536
+#define NEWDEV_WRITE_BUF_SIZE           512
+
+//#define NEWDEV_ADDRESSABLE_MASK         0x1ffff
+#define NEWDEV_ADDRESSABLE_SIZE         NEWDEV_REG_SIZE + NEWDEV_BUF_SIZE + NEWDEV_WRITE_BUF_SIZE -1
+#define NEWDEV_PCI_BAR_SIZE             1048576  /* 2^20; Must be a power of two! */
+
+#define NEWDEV_REGISTER_BOUNDARY        NEWDEV_REG_SIZE
+#define NEWDEV_BUF_BOUNDARY             NEWDEV_BUF_SIZE + NEWDEV_REG_SIZE
 
 // DEVICE BUFMMIO STRUCTURE. OFFSET IN #bytes/sizeof(uint32_t)
 
@@ -77,30 +85,44 @@
 // +---+--------------------------------+
 // | 1 |          lower_irq [W]         |
 // +---+--------------------------------+
-// | 2 |      unspecified/reserved      |
+// | 2 |        doorbell region         |
 // +---+--------------------------------+
 // | 3 |      unspecified/reserved      |
 // +---+--------------------------------+
-// | 4 |                                |
-// +---+                                |
-// | 5 |            buffer              |
-// +---+                                |
-// |   |                                |
-// |   |                                |
-//                  ......
-// |   |                                |
-// |   |                                |
+// | 4 |      unspecified/reserved      |
 // +---+--------------------------------+
+// | 5 |      unspecified/reserved      |
+// +---+--------------------------------+
+// | 6 |      unspecified/reserved      |
+// +---+--------------------------------+
+// | 7 |      unspecified/reserved      |
+// +---+--------------------------------+
+// | 8 |                                | /* Buffer used by the user to read */
+// +---+                                |
+// | 9 |            buffer              |
+// +---+                                |
+//
+//                  ......
+// +---------+                          +
+// | 64K + 7 |                          |   /* 65543 */
+// +---------+--------------------------+
+// | 64K + 8 |      Write Buffer        |   /* 65544 */
+// +---------+                          |   /* 512B Buffer that is used by the user to write */
+//                  ......
+// +---------+                          +
+// |64K + 135|                          |   /* 65671 */
+// +---------+--------------------------+
 
 typedef struct {
     PCIDevice pdev;
     MemoryRegion mmio;
 
-    /* Storage for the I/O registers. */
-    uint32_t ioregs[NEWDEV_REG_END >> 2];
+    /* Registers */
+    uint32_t registers[NEWDEV_REG_SIZE];
 
     /* Storage for the buffer. */
     uint32_t *buf;
+    uint32_t *write_buf;
 
     QemuThread thread;
     QemuMutex thr_mutex;
@@ -177,7 +199,6 @@ static void accept_handle_read(void *opaque){
 
 static void connected_handle_read(void *opaque){
     NewdevState *newdev = opaque;
-    // char buf[50];
     int len = 0;
     struct bpf_injection_msg_header* myheader;
 
@@ -186,7 +207,7 @@ static void connected_handle_read(void *opaque){
     DBG("readable socket fd:\t%d\n", newdev->connect_fd);
 
     // Receive message header (version|type|payload_length) [place it in newdev->buf at offset 4*sizeof(uint32_t)]
-    len = recv(newdev->connect_fd, newdev->buf + 4, sizeof(struct bpf_injection_msg_header), 0);
+    len = recv(newdev->connect_fd, newdev->buf, sizeof(struct bpf_injection_msg_header), 0);
     if(len <= 0){
         DBG("len = %d [<=0] --> connection reset or error. Removing connect_fd, restoring listen_fd\n", len);
         //connection closed[0] or error[<0]
@@ -199,12 +220,12 @@ static void connected_handle_read(void *opaque){
         qemu_set_fd_handler(newdev->listen_fd, accept_handle_read, NULL, newdev);  
         return;
     }
-    myheader = (struct bpf_injection_msg_header*) newdev->buf + 4;
+    myheader = (struct bpf_injection_msg_header*) newdev->buf;
     print_bpf_injection_message(*myheader);   
 
     // Receive message payload. Place it in newdev->buf + 4 + sizeof(struct bpf_injection_msg_header)/sizeof(uint32_t)
     // All those manipulation is because newdev->buf is a pointer to uint32_t so you have to provide offset in bytes/4 or in uint32_t
-    len = recv(newdev->connect_fd, newdev->buf + 4 + sizeof(struct bpf_injection_msg_header)/sizeof(uint32_t), myheader->payload_len, 0);
+    len = recv(newdev->connect_fd, newdev->buf + sizeof(struct bpf_injection_msg_header)/sizeof(uint32_t), myheader->payload_len, 0);
     // DBG("payload received of len: %d bytes", len);
 
     //debug dump
@@ -253,7 +274,7 @@ static void connected_handle_read(void *opaque){
                     cpu = qemu_get_cpu(vCPU_count);                
                 }
                 DBG("Guest has %d vCPUS", vCPU_count);
-                myaffinityinfo = (struct cpu_affinity_infos_t*)(newdev->buf + 4 + sizeof(struct bpf_injection_msg_header)/sizeof(uint32_t));
+                myaffinityinfo = (struct cpu_affinity_infos_t*)(newdev->buf + sizeof(struct bpf_injection_msg_header)/sizeof(uint32_t));
                 myaffinityinfo->n_vCPU = vCPU_count;
                 DBG("#pCPU: %u", myaffinityinfo->n_pCPU);
                 DBG("#vCPU: %u", myaffinityinfo->n_vCPU);
@@ -341,125 +362,144 @@ static void newdev_lower_irq(NewdevState *newdev, uint32_t val){
     }
 }
 
+static void handle_doorbell(NewdevState *newdev, uint32_t value){
+
+    //tipo IOCTL_PROGRAM_INJECTION_RESULT_READY
+
+{
+    //Data are passed as an array of 64 bits
+    uint64_t *ptr = (uint64_t*)(newdev->write_buf);
+
+    uint64_t size = *ptr;
+    uint64_t value = *(ptr+2);
+
+    DBG("size: %lu\n",size);
+
+    if(value)
+        DBG("UNPIN\n");
+    else
+        DBG("PIN\n");
+
+    DBG("CPU_MASK %lu\n",*(ptr+1));
+}
+    return;
+{
+    int vCPU_count=0;
+    uint64_t value = 3;//val;
+    cpu_set_t *set;
+    CPUState* cpu;
+
+    set = CPU_ALLOC(MAX_CPU);
+    memcpy(set, &value, SET_SIZE);
+
+    cpu = qemu_get_cpu(vCPU_count);
+    while(cpu != NULL){
+        DBG("cpu #%d[%d]\tthread id:%d", vCPU_count, cpu->cpu_index, cpu->thread_id);
+        if(CPU_ISSET_S(vCPU_count, SET_SIZE, set)){
+            int remap = vCPU_count;
+            if(newdev->hyperthreading_remapping == true){
+                remap = map_hyperthread(set);   //if 1 cpu is set then remap, otherwise do nothing
+            }
+            if (sched_setaffinity(cpu->thread_id, SET_SIZE, set) == -1){
+                DBG("error sched_setaffinity");
+            }
+
+            DBG("---IOCTL_SCHED_SETAFFINITY triggered this.\nCall sched_setaffinity to bind vCPU%d(thread %d) to pCPU%d", vCPU_count, cpu->thread_id, remap);
+        }
+        vCPU_count++;
+        cpu = qemu_get_cpu(vCPU_count);
+    }
+    DBG("#pCPU: %u", get_nprocs()); //assuming NON hotpluggable cpus
+    DBG("#vCPU: %u", vCPU_count);            
+
+    CPU_FREE(set);
+}
+}
+
+static void write_registers(NewdevState *newdev, uint32_t index, uint32_t val){
+    
+    switch(index){
+        case 0:
+            newdev_raise_irq(newdev, val);  //TODO: FIX
+            break;
+        case 1:
+            newdev_lower_irq(newdev, val);  //ACK the IRQ
+            break;
+        case 2:
+            //doorbell region: write of the results completed
+            DBG("doorbell in device!");
+            handle_doorbell(newdev,val);
+            break;
+        default:
+            newdev->registers[index] = val;
+            break;
+    }
+}
+
+static uint32_t read_registers(NewdevState *newdev, uint32_t index){
+
+    switch(index){
+        case 0:
+            //DBG("BUF read [case 0] val=0x%08" PRIx32, newdev->irq_status);
+            return newdev->irq_status;
+        default:
+            return newdev->registers[index];
+    }
+
+}
+
 static uint64_t newdev_bufmmio_read(void *opaque, hwaddr addr, unsigned size){
     NewdevState *newdev = opaque;
     unsigned int index;
 
-    addr = addr & NEWDEV_BUF_MASK;
-    index = addr >> 2;
+    index = addr/sizeof(uint32_t);
 
-    if (addr + size > NEWDEV_BUF_SIZE * sizeof(uint32_t)) {
+    if (addr + size > NEWDEV_ADDRESSABLE_SIZE) {
         DBG("Out of bounds BUF read, addr=0x%08"PRIx64, addr);
         return 0;
     }
 
+    /* Read from registers */
+    if(index < NEWDEV_REGISTER_BOUNDARY){
+        return read_registers(newdev,index);
+    } else if(index < NEWDEV_BUF_BOUNDARY){
+        index -= NEWDEV_REGISTER_BOUNDARY;
+        return newdev->buf[index];
+    } 
 
-    switch(index){
-        case 0:
-            DBG("BUF read [case 0] val=0x%08" PRIx32, newdev->irq_status);
-            return newdev->irq_status;
-        default:
-            break;
-    }
+    index -= NEWDEV_BUF_BOUNDARY;
+    return newdev->write_buf[index];
+
     // DBG("BUF read index=%u", index);
     // DBG("BUF read val=0x%08" PRIx32, newdev->buf[index]);
-    return newdev->buf[index];
 }
 
 static void newdev_bufmmio_write(void *opaque, hwaddr addr, uint64_t val, unsigned size){
     NewdevState *newdev = opaque;
-    unsigned int index;
+    uint32_t index;
 
+    index = addr/sizeof(uint32_t);
 
-    addr = addr & NEWDEV_BUF_MASK;
-    index = addr >> 2;
-
-    if (addr + size > NEWDEV_BUF_SIZE * sizeof(uint32_t)) {
-        DBG("Out of bounds BUF read, addr=0x%08"PRIx64, addr);
+    if (index + size > NEWDEV_ADDRESSABLE_SIZE) {
+        DBG("Out of bounds BUF write, addr=0x%08"PRIx64, addr);
+        DBG("bounds addr=0x%08"PRIx64,(long unsigned int) NEWDEV_ADDRESSABLE_SIZE);
         return;
     }
 
-    // DBG("BUF write val=0x%08" PRIx64, val);
+    //Writing into registers
+    if(index < NEWDEV_REGISTER_BOUNDARY){
+        return write_registers(newdev,index,val);
+    } else if(index < NEWDEV_BUF_BOUNDARY){
+        DBG("should not write here! %d\n",index);
 
-    switch(index){
-        case 0:
-            newdev_raise_irq(newdev, val);
-            break;
-        case 1:        
-            newdev_lower_irq(newdev, val);
-            break;
-        case 2:
-            //doorbell region for guest->hw notification
-            DBG("doorbell in device!");
-            //process this response from guest daemon...
-
-            //debug dump
-            // {
-            //     struct bpf_injection_msg_header* myheader;
-            //     myheader = (struct bpf_injection_msg_header*) newdev->buf + 4;
-            //     print_bpf_injection_message(*myheader); 
-            //     int payload_left = myheader->payload_len;
-            //     int offset = 0;
-            //     while(payload_left > 0){
-            //         unsigned int tmp = *(unsigned int*)(newdev->buf + 4 + sizeof(struct bpf_injection_msg_header)/sizeof(uint32_t) + offset);
-            //         DBG("value\t%x", tmp);
-            //         offset += 1;
-            //         payload_left -= 4;
-            //         if(offset > 7)
-            //             break;
-            //     }
-            // }
-
-            {
-                struct bpf_injection_msg_header* myheader;
-                myheader = (struct bpf_injection_msg_header*) newdev->buf + 4;
-                send(newdev->connect_fd, myheader, sizeof(struct bpf_injection_msg_header), 0);
-                send(newdev->connect_fd, newdev->buf + 4 + sizeof(struct bpf_injection_msg_header)/sizeof(uint32_t), myheader->payload_len, 0);
-            }
-
-            //reset doorbell
-            newdev->buf[index] = 0;
-            break;
-        case 3:
-            {
-                int vCPU_count=0;
-                uint64_t value = val;                
-                cpu_set_t *set;                
-                CPUState* cpu;
-
-                set = CPU_ALLOC(MAX_CPU);
-                memcpy(set, &value, SET_SIZE);                
-
-                cpu = qemu_get_cpu(vCPU_count);
-                while(cpu != NULL){
-                    DBG("cpu #%d[%d]\tthread id:%d", vCPU_count, cpu->cpu_index, cpu->thread_id);
-                    if(CPU_ISSET_S(vCPU_count, SET_SIZE, set)){
-                        int remap = vCPU_count;
-                        if(newdev->hyperthreading_remapping == true){                            
-                            remap = map_hyperthread(set);   //if 1 cpu is set then remap, otherwise do nothing
-                        }
-                        if (sched_setaffinity(cpu->thread_id, SET_SIZE, set) == -1){
-                            DBG("error sched_setaffinity");
-                        }                          
-
-                        DBG("---IOCTL_SCHED_SETAFFINITY triggered this.\nCall sched_setaffinity to bind vCPU%d(thread %d) to pCPU%d", vCPU_count, cpu->thread_id, remap);
-                    }
-                    vCPU_count++;
-                    cpu = qemu_get_cpu(vCPU_count);                
-                }                
-                DBG("#pCPU: %u", get_nprocs()); //assuming NON hotpluggable cpus
-                DBG("#vCPU: %u", vCPU_count);            
-
-                CPU_FREE(set);
-                break;
-            }
-        default:
-            newdev->buf[index] = val;
-            break;
+        index -= NEWDEV_REGISTER_BOUNDARY;
+        newdev->buf[index] = val;
+        return;
     }
 
+    index -= NEWDEV_BUF_BOUNDARY;
+    newdev->write_buf[index] = val;
 
-    return;
 }
 
 
@@ -474,7 +514,7 @@ static const MemoryRegionOps newdev_bufmmio_ops = {
 
 };
 
-static int make_socket (uint16_t port){
+static int make_socket(uint16_t port){
   int sock;
   struct sockaddr_in name;
 
@@ -515,11 +555,11 @@ static void newdev_realize(PCIDevice *pdev, Error **errp)
 
     /* Init memory mapped memory region, to expose eBPF programs. */
     memory_region_init_io(&newdev->mmio, OBJECT(newdev), &newdev_bufmmio_ops, newdev,
-                    "newdev-buf", NEWDEV_BUF_SIZE * sizeof(uint32_t));
+                    "newdev-buf", NEWDEV_PCI_BAR_SIZE * sizeof(uint32_t));
     pci_register_bar(pdev, NEWDEV_BUF_PCI_BAR, PCI_BASE_ADDRESS_SPACE_MEMORY, &newdev->mmio);
 
-    newdev->buf = malloc(NEWDEV_BUF_SIZE * sizeof(uint32_t));
-    
+    newdev->buf         = malloc(NEWDEV_BUF_SIZE * sizeof(uint32_t));
+    newdev->write_buf   = malloc(NEWDEV_WRITE_BUF_SIZE * sizeof(uint32_t));
 
     //set_fd_handler?
     newdev->listen_fd = -1;
@@ -554,6 +594,9 @@ static void newdev_uninit(PCIDevice *pdev)
 {
     NewdevState *newdev = NEWDEV(pdev);
 
+    free(newdev->buf);
+    free(newdev->write_buf);
+
     qemu_mutex_lock(&newdev->thr_mutex);
     newdev->stopping = true;
     qemu_mutex_unlock(&newdev->thr_mutex);
@@ -581,8 +624,8 @@ static void newdev_class_init(ObjectClass *class, void *data)
     DeviceClass *dc = DEVICE_CLASS(class);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(class);
 
-    k->realize = newdev_realize;
-    k->exit = newdev_uninit;
+    k->realize   = newdev_realize;
+    k->exit      = newdev_uninit;
     k->vendor_id = PCI_VENDOR_ID_QEMU;
     k->device_id = NEWDEV_DEVICE_ID;
     
@@ -606,7 +649,7 @@ static void newdev_register_types(void)
         .instance_size = sizeof(NewdevState),
         .instance_init = newdev_instance_init,
         .class_init    = newdev_class_init,
-        .interfaces = interfaces,
+        .interfaces    = interfaces,
     };
 
     type_register_static(&newdev_info);
