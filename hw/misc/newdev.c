@@ -78,6 +78,8 @@
 #define NEWDEV_REGISTER_BOUNDARY        NEWDEV_REG_SIZE
 #define NEWDEV_BUF_BOUNDARY             NEWDEV_BUF_SIZE + NEWDEV_REG_SIZE
 
+#define VCPU_PINNING_TYPE               1
+
 // DEVICE BUFMMIO STRUCTURE. OFFSET IN #bytes/sizeof(uint32_t)
 
 // +---+--------------------------------+
@@ -380,6 +382,7 @@ static void vcpu_pinning(NewdevState *newdev, uint64_t* ptr, uint32_t size){
         return;
     }
 
+
     DBG("vCPU: %d\n",index);
 
     CPU_ZERO_S(SET_SIZE,cpu_set);
@@ -409,6 +412,11 @@ static void vcpu_pinning(NewdevState *newdev, uint64_t* ptr, uint32_t size){
 
     } else {
         DBG("PIN\n");
+        if(__builtin_popcountll(cpu_mask) > 1){
+            DBG("Pinning to more than 1 CPU: not implemented!\n");
+            goto exit;
+        }
+
         newdev->vCPU_counter[index]++;
         if(newdev->vCPU_counter[index] == 1){
             CPU_SET_S(index,SET_SIZE, cpu_set);
@@ -421,10 +429,21 @@ static void vcpu_pinning(NewdevState *newdev, uint64_t* ptr, uint32_t size){
 
     }
 
+    exit:
+
     CPU_FREE(cpu_set);
 
 
 }
+
+// 64 bits
+/* +-----------------------------+*/
+/* |            Type             |*/  //vCPU and so on
+/* +-----------------------------+*/
+/* |        Payload Size         |*/
+/* +-----------------------------+*/
+/* |           Payload           |*/
+/* +-----------------------------+*/
 
 static void handle_doorbell(NewdevState *newdev, uint32_t value){
 
@@ -432,10 +451,13 @@ static void handle_doorbell(NewdevState *newdev, uint32_t value){
 
     //Data are passed as an array of 64 bits
     uint64_t *ptr = (uint64_t*)(newdev->write_buf);
-    uint64_t size = *ptr;
+    uint64_t type = *ptr;
+    uint64_t size = *(ptr+1);
 
-    vcpu_pinning(newdev,ptr+1,size);
-    return;
+    if(type == VCPU_PINNING_TYPE)
+        return vcpu_pinning(newdev,ptr+2,size);
+
+    DBG("Unrecognized Type!\n");
 
 }
 
