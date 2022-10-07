@@ -382,7 +382,7 @@ static void vcpu_pinning(NewdevState *newdev, uint64_t* ptr, uint32_t size){
 
     DBG("vCPU: %d\n",index);
 
-    CPU_ZERO(cpu_set);
+    CPU_ZERO_S(SET_SIZE,cpu_set);
 
     if(cpu == NULL){
         DBG("vCPU NOT FOUND!!!\n");
@@ -398,9 +398,9 @@ static void vcpu_pinning(NewdevState *newdev, uint64_t* ptr, uint32_t size){
         newdev->vCPU_counter[index]--;
         if(newdev->vCPU_counter[index] == 0){
             uint64_t all = (uint64_t)-1;
-            memcpy(cpu_set,&all,SET_SIZE);
+            memcpy(cpu_set,&all,sizeof(uint64_t));
         
-            if(sched_setaffinity(cpu->thread_id, SET_SIZE,cpu_set) == -1){
+            if(sched_setaffinity(cpu->thread_id, SET_SIZE, cpu_set) == -1){
                 perror("sched_setaffinity");
             } 
         }
@@ -411,8 +411,8 @@ static void vcpu_pinning(NewdevState *newdev, uint64_t* ptr, uint32_t size){
         DBG("PIN\n");
         newdev->vCPU_counter[index]++;
         if(newdev->vCPU_counter[index] == 1){
-            CPU_SET(index, cpu_set);
-            if(sched_setaffinity(cpu->thread_id, SET_SIZE,cpu_set) == -1){
+            CPU_SET_S(index,SET_SIZE, cpu_set);
+            if(sched_setaffinity(cpu->thread_id, SET_SIZE, cpu_set) == -1){
                 perror("sched_setaffinity");
             }
         }
