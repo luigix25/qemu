@@ -46,7 +46,7 @@
 #include <sys/sysinfo.h>
 #include <sched.h>
 #define MAX_CPU 64
-#define SET_SIZE CPU_ALLOC_SIZE(64)
+#define SET_SIZE CPU_ALLOC_SIZE(MAX_CPU)
 #define NEWDEV_DEVICE_ID 0x11ea
 
 /* Debug information. Define it as 1 get for basic debugging,
@@ -130,6 +130,7 @@ typedef struct {
     bool stopping;
     uint32_t irq_status;
 
+    uint32_t vCPU_counter[MAX_CPU];
 
     bool hyperthreading_remapping; 
     
@@ -362,58 +363,80 @@ static void newdev_lower_irq(NewdevState *newdev, uint32_t val){
     }
 }
 
+static void vcpu_pinning(NewdevState *newdev, uint64_t* ptr, uint32_t size){
+
+    uint64_t operation = *(ptr+1);
+    uint64_t cpu_mask  = *(ptr);
+
+    DBG("size: %d\n",size);
+    DBG("CPU_MASK %lu\n",cpu_mask);
+
+    uint32_t index = __builtin_ctzll(cpu_mask);
+    CPUState *cpu = qemu_get_cpu(index);
+    cpu_set_t *cpu_set = CPU_ALLOC(MAX_CPU);
+
+    if(cpu_set == NULL){
+        DBG("Error while allocating SET\n");
+        return;
+    }
+
+    DBG("vCPU: %d\n",index);
+
+    CPU_ZERO(cpu_set);
+
+    if(cpu == NULL){
+        DBG("vCPU NOT FOUND!!!\n");
+        return;
+    }
+    
+    /*if(newdev->hyperthreading_remapping == true){
+        remap = map_hyperthread(set);   //if 1 cpu is set then remap, otherwise do nothing
+    } */
+
+    if(operation){
+        DBG("UNPIN\n");
+        newdev->vCPU_counter[index]--;
+        if(newdev->vCPU_counter[index] == 0){
+            uint64_t all = (uint64_t)-1;
+            memcpy(cpu_set,&all,SET_SIZE);
+        
+            if(sched_setaffinity(cpu->thread_id, SET_SIZE,cpu_set) == -1){
+                perror("sched_setaffinity");
+            } 
+        }
+
+        DBG("Unpinned PID: %d\n",cpu->thread_id);
+
+    } else {
+        DBG("PIN\n");
+        newdev->vCPU_counter[index]++;
+        if(newdev->vCPU_counter[index] == 1){
+            CPU_SET(index, cpu_set);
+            if(sched_setaffinity(cpu->thread_id, SET_SIZE,cpu_set) == -1){
+                perror("sched_setaffinity");
+            }
+        }
+
+        DBG("Pinned PID: %d\n",cpu->thread_id);
+
+    }
+
+    CPU_FREE(cpu_set);
+
+
+}
+
 static void handle_doorbell(NewdevState *newdev, uint32_t value){
 
     //tipo IOCTL_PROGRAM_INJECTION_RESULT_READY
 
-{
     //Data are passed as an array of 64 bits
     uint64_t *ptr = (uint64_t*)(newdev->write_buf);
-
     uint64_t size = *ptr;
-    uint64_t value = *(ptr+2);
 
-    DBG("size: %lu\n",size);
-
-    if(value)
-        DBG("UNPIN\n");
-    else
-        DBG("PIN\n");
-
-    DBG("CPU_MASK %lu\n",*(ptr+1));
-}
+    vcpu_pinning(newdev,ptr+1,size);
     return;
-{
-    int vCPU_count=0;
-    uint64_t value = 3;//val;
-    cpu_set_t *set;
-    CPUState* cpu;
 
-    set = CPU_ALLOC(MAX_CPU);
-    memcpy(set, &value, SET_SIZE);
-
-    cpu = qemu_get_cpu(vCPU_count);
-    while(cpu != NULL){
-        DBG("cpu #%d[%d]\tthread id:%d", vCPU_count, cpu->cpu_index, cpu->thread_id);
-        if(CPU_ISSET_S(vCPU_count, SET_SIZE, set)){
-            int remap = vCPU_count;
-            if(newdev->hyperthreading_remapping == true){
-                remap = map_hyperthread(set);   //if 1 cpu is set then remap, otherwise do nothing
-            }
-            if (sched_setaffinity(cpu->thread_id, SET_SIZE, set) == -1){
-                DBG("error sched_setaffinity");
-            }
-
-            DBG("---IOCTL_SCHED_SETAFFINITY triggered this.\nCall sched_setaffinity to bind vCPU%d(thread %d) to pCPU%d", vCPU_count, cpu->thread_id, remap);
-        }
-        vCPU_count++;
-        cpu = qemu_get_cpu(vCPU_count);
-    }
-    DBG("#pCPU: %u", get_nprocs()); //assuming NON hotpluggable cpus
-    DBG("#vCPU: %u", vCPU_count);            
-
-    CPU_FREE(set);
-}
 }
 
 static void write_registers(NewdevState *newdev, uint32_t index, uint32_t val){
@@ -585,6 +608,9 @@ static void newdev_realize(PCIDevice *pdev, Error **errp)
     
     DBG("qemu listen_fd added");
 
+
+    for(int i=0;i<MAX_CPU;i++)
+        newdev->vCPU_counter[i] = 0;
 
     DBG("**** device realized ****");
 
