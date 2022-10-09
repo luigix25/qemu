@@ -367,8 +367,8 @@ static void newdev_lower_irq(NewdevState *newdev, uint32_t val){
 
 static void vcpu_pinning(NewdevState *newdev, uint64_t* ptr, uint32_t size){
 
-    uint64_t operation = *(ptr+1);
     uint64_t cpu_mask  = *(ptr);
+    uint64_t operation = *(ptr+1);
 
     DBG("size: %d\n",size);
     DBG("CPU_MASK %lu\n",cpu_mask);
@@ -379,9 +379,8 @@ static void vcpu_pinning(NewdevState *newdev, uint64_t* ptr, uint32_t size){
 
     if(cpu_set == NULL){
         DBG("Error while allocating SET\n");
-        return;
+        goto exit;
     }
-
 
     DBG("vCPU: %d\n",index);
 
@@ -389,7 +388,7 @@ static void vcpu_pinning(NewdevState *newdev, uint64_t* ptr, uint32_t size){
 
     if(cpu == NULL){
         DBG("vCPU NOT FOUND!!!\n");
-        return;
+        goto exit;
     }
     
     /*if(newdev->hyperthreading_remapping == true){
@@ -430,6 +429,9 @@ static void vcpu_pinning(NewdevState *newdev, uint64_t* ptr, uint32_t size){
     }
 
     exit:
+
+    //Signaling that processing of the data was completed
+    newdev_raise_irq(newdev,PROGRAM_INJECTION_RESULT);
 
     CPU_FREE(cpu_set);
 
