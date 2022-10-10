@@ -25,26 +25,23 @@
 #include "qemu/units.h"
 #include "hw/pci/pci.h"
 #include "hw/hw.h"
-#include "hw/pci/msi.h"
-#include "qemu/timer.h"
-#include "qemu/main-loop.h" /* iothread mutex */
 #include "qemu/module.h"
+#include "qemu/sockets.h"
 #include "qapi/visitor.h"
 
-#include <sys/inotify.h>
+//#include <sys/inotify.h>
 #include <errno.h>
-#include <poll.h>
+//#include <poll.h>
 
-#include <sys/types.h> 
-#include <sys/socket.h> 
+//#include <sys/types.h> 
+//#include <sys/socket.h> 
 
 #include "hw/misc/bpf_injection_msg.h"
-
 #include "hw/core/cpu.h"
 
 //Affinity part
 #include <sys/sysinfo.h>
-#include <sched.h>
+//#include <sched.h>
 #define MAX_CPU 64
 #define SET_SIZE CPU_ALLOC_SIZE(MAX_CPU)
 #define NEWDEV_DEVICE_ID 0x11ea
@@ -79,6 +76,10 @@
 #define NEWDEV_BUF_BOUNDARY             NEWDEV_BUF_SIZE + NEWDEV_REG_SIZE
 
 #define VCPU_PINNING_TYPE               1
+
+/* Data in Doorbell */
+#define NEWDEV_DOORBELL_RESULT_READY        1
+#define NEWDEV_DOORBELL_INJECTION_FINISHED  2
 
 // DEVICE BUFMMIO STRUCTURE. OFFSET IN #bytes/sizeof(uint32_t)
 
@@ -126,11 +127,8 @@ typedef struct {
     uint32_t *buf;
     uint32_t *write_buf;
 
-    QemuThread thread;
-    QemuMutex thr_mutex;
-    QemuCond thr_cond;
-    bool stopping;
     uint32_t irq_status;
+    bool user_reading;  //Is true when the IRQ is fired, false when user tells the device that the read operation is complete
 
     uint32_t vCPU_counter[MAX_CPU];
 
@@ -179,18 +177,19 @@ static void accept_handle_read(void *opaque){
     DBG("accept_handle_read\n");
     DBG("incoming connection on socket fd:\t%d\n", newdev->listen_fd);
     
-
-    /* CAN RAISE IRQ HERE */
-    // DBG("raising irq for fun?\n");
-    // newdev_raise_irq(newdev, 22);
-
     //Accept connection from peer
-    newdev->connect_fd = accept(newdev->listen_fd, NULL, NULL);
+    newdev->connect_fd = qemu_accept(newdev->listen_fd, NULL, NULL);
     DBG("accepted connection from peer. connect_fd:\t%d\n", newdev->connect_fd);
+
+    if(newdev->user_reading){ 
+        DBG("Ignoring connection: busy!");
+        qemu_close(newdev->connect_fd);
+        newdev->connect_fd = -1;
+        return;
+    }
 
     //Add connect_fd from list of watched fd in iothread select
     qemu_set_fd_handler(newdev->connect_fd, connected_handle_read, NULL, newdev);
-
 
     //Remove listen_fd from watched fd in iothread select
     qemu_set_fd_handler(newdev->listen_fd, NULL, NULL, NULL);
@@ -205,23 +204,15 @@ static void connected_handle_read(void *opaque){
     int len = 0;
     struct bpf_injection_msg_header* myheader;
 
-
     DBG("connect_handle_read\n");
     DBG("readable socket fd:\t%d\n", newdev->connect_fd);
 
     // Receive message header (version|type|payload_length) [place it in newdev->buf at offset 4*sizeof(uint32_t)]
     len = recv(newdev->connect_fd, newdev->buf, sizeof(struct bpf_injection_msg_header), 0);
     if(len <= 0){
-        DBG("len = %d [<=0] --> connection reset or error. Removing connect_fd, restoring listen_fd\n", len);
         //connection closed[0] or error[<0]
-
-        //Remove connect_fd from watched fd in iothread select
-        qemu_set_fd_handler(newdev->connect_fd, NULL, NULL, NULL);
-        newdev->connect_fd = -1;
-
-        //Add listen_fd from list of watched fd in iothread select
-        qemu_set_fd_handler(newdev->listen_fd, accept_handle_read, NULL, newdev);  
-        return;
+        DBG("len = %d [<=0] --> connection reset or error.\n", len);
+        goto close_and_listen;
     }
     myheader = (struct bpf_injection_msg_header*) newdev->buf;
     print_bpf_injection_message(*myheader);   
@@ -229,21 +220,7 @@ static void connected_handle_read(void *opaque){
     // Receive message payload. Place it in newdev->buf + 4 + sizeof(struct bpf_injection_msg_header)/sizeof(uint32_t)
     // All those manipulation is because newdev->buf is a pointer to uint32_t so you have to provide offset in bytes/4 or in uint32_t
     len = recv(newdev->connect_fd, newdev->buf + sizeof(struct bpf_injection_msg_header)/sizeof(uint32_t), myheader->payload_len, 0);
-    // DBG("payload received of len: %d bytes", len);
-
-    //debug dump
-    // {
-    //     int payload_left = myheader->payload_len;
-    //     int offset = 0;
-    //     while(payload_left > 0){
-    //         unsigned int tmp = *(unsigned int*)(newdev->buf + 4 + sizeof(struct bpf_injection_msg_header)/sizeof(uint32_t) + offset);
-    //         DBG("value\t%x", tmp);
-    //         offset += 1;
-    //         payload_left -= 4;
-    //         if(offset > 7)
-    //             break;
-    //     }
-    // }
+    DBG("Received all Data, closing connection\n");
 
     //big switch depending on msg.header.type
     switch(myheader->type){
@@ -251,6 +228,7 @@ static void connected_handle_read(void *opaque){
             // Program is stored in buf. Trigger interrupt to propagate this info
             // to the guest side. Convention::: use interrupt number equal to case
             DBG("PROGRAM_INJECTION-> interrupt fired");
+            newdev->user_reading = true;
             newdev_raise_irq(newdev, PROGRAM_INJECTION);
             {
                 int i=0;
@@ -344,6 +322,16 @@ static void connected_handle_read(void *opaque){
             return;            
     }
 
+    close_and_listen:
+
+    DBG("Closing Connecton\n");
+    //Close Socket
+    qemu_close(newdev->connect_fd);
+    //Remove connect_fd from watched fd in iothread select
+    qemu_set_fd_handler(newdev->connect_fd, NULL, NULL, NULL);
+    newdev->connect_fd = -1;
+    //Add listen to the iothread select
+    qemu_set_fd_handler(newdev->listen_fd, accept_handle_read, NULL, newdev);  
     return;
 }
 
@@ -440,7 +428,7 @@ static void vcpu_pinning(NewdevState *newdev, uint64_t* ptr, uint32_t size){
 
 // 64 bits
 /* +-----------------------------+*/
-/* |            Type             |*/  //vCPU and so on
+/* |            Type             |*/  //vCPU Pinning and so on
 /* +-----------------------------+*/
 /* |        Payload Size         |*/
 /* +-----------------------------+*/
@@ -449,17 +437,27 @@ static void vcpu_pinning(NewdevState *newdev, uint64_t* ptr, uint32_t size){
 
 static void handle_doorbell(NewdevState *newdev, uint32_t value){
 
-    //tipo IOCTL_PROGRAM_INJECTION_RESULT_READY
+    switch (value){
+        case NEWDEV_DOORBELL_RESULT_READY:{
+            //Data are passed as an array of 64 bits
+            uint64_t *ptr = (uint64_t*)(newdev->write_buf);
+            uint64_t type = *ptr;
+            uint64_t size = *(ptr+1);
 
-    //Data are passed as an array of 64 bits
-    uint64_t *ptr = (uint64_t*)(newdev->write_buf);
-    uint64_t type = *ptr;
-    uint64_t size = *(ptr+1);
+            if(type == VCPU_PINNING_TYPE)
+                return vcpu_pinning(newdev,ptr+2,size);
+            break;
+        }
+        case NEWDEV_DOORBELL_INJECTION_FINISHED:
+            newdev->user_reading = false;
+            return;
+        default:
+            DBG("Unrecognized Value in Doorbell!\n");
+            return;
+    }
 
-    if(type == VCPU_PINNING_TYPE)
-        return vcpu_pinning(newdev,ptr+2,size);
+    DBG("Unrecognized Type of Injection!\n");
 
-    DBG("Unrecognized Type!\n");
 
 }
 
@@ -566,7 +564,7 @@ static int make_socket(uint16_t port){
   struct sockaddr_in name;
 
   /* Create the socket. */
-  sock = socket (PF_INET, SOCK_STREAM, 0);
+  sock = qemu_socket(PF_INET, SOCK_STREAM, 0);
   if (sock < 0)
     {
       perror ("socket");
@@ -575,8 +573,8 @@ static int make_socket(uint16_t port){
 
   /* Give the socket a name. */
   name.sin_family = AF_INET;
-  name.sin_port = htons (port);
-  name.sin_addr.s_addr = htonl (INADDR_ANY);
+  name.sin_port = htons(port);
+  name.sin_addr.s_addr = htonl(INADDR_ANY);
   if (bind (sock, (struct sockaddr *) &name, sizeof (name)) < 0)
     {
       perror ("bind");
@@ -593,13 +591,6 @@ static void newdev_realize(PCIDevice *pdev, Error **errp)
 
     pci_config_set_interrupt_pin(pci_conf, 1);
 
-    if (msi_init(pdev, 0, 1, true, false, errp)) {
-        return;
-    }
-
-    qemu_mutex_init(&newdev->thr_mutex);
-    qemu_cond_init(&newdev->thr_cond);
-
     /* Init memory mapped memory region, to expose eBPF programs. */
     memory_region_init_io(&newdev->mmio, OBJECT(newdev), &newdev_bufmmio_ops, newdev,
                     "newdev-buf", NEWDEV_PCI_BAR_SIZE * sizeof(uint32_t));
@@ -612,6 +603,8 @@ static void newdev_realize(PCIDevice *pdev, Error **errp)
     newdev->listen_fd = -1;
     newdev->connect_fd = -1;
 
+    newdev->user_reading = false;
+
     //setup ht (default=disabled)
     newdev->hyperthreading_remapping = false;
 
@@ -622,7 +615,7 @@ static void newdev_realize(PCIDevice *pdev, Error **errp)
 
     DBG("socket fd:\t%d", newdev->listen_fd);
 
-    if (listen (newdev->listen_fd, 1) < 0){
+    if (listen(newdev->listen_fd, 1) < 0){
       DBG("listen error\n");
       return;        
     }
@@ -646,18 +639,6 @@ static void newdev_uninit(PCIDevice *pdev)
 
     free(newdev->buf);
     free(newdev->write_buf);
-
-    qemu_mutex_lock(&newdev->thr_mutex);
-    newdev->stopping = true;
-    qemu_mutex_unlock(&newdev->thr_mutex);
-    qemu_cond_signal(&newdev->thr_cond);
-    qemu_thread_join(&newdev->thread);
-
-    qemu_cond_destroy(&newdev->thr_cond);
-    qemu_mutex_destroy(&newdev->thr_mutex);
-
-    msi_uninit(pdev);
-
 
     //unset_fd_handler
     if (newdev->listen_fd != -1) {
