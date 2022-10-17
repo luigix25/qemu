@@ -392,10 +392,10 @@ static void vcpu_pinning(NewdevState *newdev, uint64_t* ptr, uint32_t size){
         
             if(sched_setaffinity(cpu->thread_id, SET_SIZE, cpu_set) == -1){
                 perror("sched_setaffinity");
-            } 
+            }
+            DBG("Unpinned PID: %d\n",cpu->thread_id); 
         }
 
-        DBG("Unpinned PID: %d\n",cpu->thread_id);
 
     } else {
         DBG("PIN\n");
@@ -410,9 +410,8 @@ static void vcpu_pinning(NewdevState *newdev, uint64_t* ptr, uint32_t size){
             if(sched_setaffinity(cpu->thread_id, SET_SIZE, cpu_set) == -1){
                 perror("sched_setaffinity");
             }
+            DBG("Pinned PID: %d\n",cpu->thread_id);
         }
-
-        DBG("Pinned PID: %d\n",cpu->thread_id);
 
     }
 
