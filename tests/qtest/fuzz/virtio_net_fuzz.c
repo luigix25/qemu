@@ -61,7 +61,8 @@ static void virtio_net_fuzz_multi(QTestState *s,
          * backend. Otherwise, always place the input on a virtqueue.
          */
         if (vqa.rx && sockfds_initialized) {
-            write(sockfds[0], Data, vqa.length);
+            int ignored = write(sockfds[0], Data, vqa.length);
+            (void) ignored;
         } else {
             vqa.rx = 0;
             uint64_t req_addr = guest_alloc(t_alloc, vqa.length);
@@ -122,6 +123,7 @@ static void virtio_net_fork_fuzz(QTestState *s,
         flush_events(s);
         _Exit(0);
     } else {
+        flush_events(s);
         wait(NULL);
     }
 }
@@ -134,6 +136,7 @@ static void virtio_net_fork_fuzz_check_used(QTestState *s,
         flush_events(s);
         _Exit(0);
     } else {
+        flush_events(s);
         wait(NULL);
     }
 }
@@ -148,7 +151,7 @@ static void *virtio_net_test_setup_socket(GString *cmd_line, void *arg)
 {
     int ret = socketpair(PF_UNIX, SOCK_STREAM, 0, sockfds);
     g_assert_cmpint(ret, !=, -1);
-    fcntl(sockfds[0], F_SETFL, O_NONBLOCK);
+    g_unix_set_fd_nonblocking(sockfds[0], true, NULL);
     sockfds_initialized = true;
     g_string_append_printf(cmd_line, " -netdev socket,fd=%d,id=hs0 ",
                            sockfds[1]);

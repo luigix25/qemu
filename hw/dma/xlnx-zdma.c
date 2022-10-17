@@ -299,19 +299,30 @@ static void zdma_put_regaddr64(XlnxZDMA *s, unsigned int basereg, uint64_t addr)
     s->regs[basereg + 1] = addr >> 32;
 }
 
-static bool zdma_load_descriptor(XlnxZDMA *s, uint64_t addr, void *buf)
+static void zdma_load_descriptor_reg(XlnxZDMA *s, unsigned int reg,
+                                     XlnxZDMADescr *descr)
+{
+    descr->addr = zdma_get_regaddr64(s, reg);
+    descr->size = s->regs[reg + 2];
+    descr->attr = s->regs[reg + 3];
+}
+
+static bool zdma_load_descriptor(XlnxZDMA *s, uint64_t addr,
+                                 XlnxZDMADescr *descr)
 {
     /* ZDMA descriptors must be aligned to their own size.  */
     if (addr % sizeof(XlnxZDMADescr)) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "zdma: unaligned descriptor at %" PRIx64,
                       addr);
-        memset(buf, 0x0, sizeof(XlnxZDMADescr));
+        memset(descr, 0x0, sizeof(XlnxZDMADescr));
         s->error = true;
         return false;
     }
 
-    address_space_read(s->dma_as, addr, s->attr, buf, sizeof(XlnxZDMADescr));
+    descr->addr = address_space_ldq_le(&s->dma_as, addr, s->attr, NULL);
+    descr->size = address_space_ldl_le(&s->dma_as, addr + 8, s->attr, NULL);
+    descr->attr = address_space_ldl_le(&s->dma_as, addr + 12, s->attr, NULL);
     return true;
 }
 
@@ -321,8 +332,7 @@ static void zdma_load_src_descriptor(XlnxZDMA *s)
     unsigned int ptype = ARRAY_FIELD_EX32(s->regs, ZDMA_CH_CTRL0, POINT_TYPE);
 
     if (ptype == PT_REG) {
-        memcpy(&s->dsc_src, &s->regs[R_ZDMA_CH_SRC_DSCR_WORD0],
-               sizeof(s->dsc_src));
+        zdma_load_descriptor_reg(s, R_ZDMA_CH_SRC_DSCR_WORD0, &s->dsc_src);
         return;
     }
 
@@ -344,7 +354,7 @@ static void zdma_update_descr_addr(XlnxZDMA *s, bool type,
     } else {
         addr = zdma_get_regaddr64(s, basereg);
         addr += sizeof(s->dsc_dst);
-        address_space_read(s->dma_as, addr, s->attr, (void *) &next, 8);
+        next = address_space_ldq_le(&s->dma_as, addr, s->attr, NULL);
     }
 
     zdma_put_regaddr64(s, basereg, next);
@@ -357,8 +367,7 @@ static void zdma_load_dst_descriptor(XlnxZDMA *s)
     bool dst_type;
 
     if (ptype == PT_REG) {
-        memcpy(&s->dsc_dst, &s->regs[R_ZDMA_CH_DST_DSCR_WORD0],
-               sizeof(s->dsc_dst));
+        zdma_load_descriptor_reg(s, R_ZDMA_CH_DST_DSCR_WORD0, &s->dsc_dst);
         return;
     }
 
@@ -412,7 +421,7 @@ static void zdma_write_dst(XlnxZDMA *s, uint8_t *buf, uint32_t len)
             }
         }
 
-        address_space_write(s->dma_as, s->dsc_dst.addr, s->attr, buf, dlen);
+        address_space_write(&s->dma_as, s->dsc_dst.addr, s->attr, buf, dlen);
         if (burst_type == AXI_BURST_INCR) {
             s->dsc_dst.addr += dlen;
         }
@@ -488,7 +497,7 @@ static void zdma_process_descr(XlnxZDMA *s)
                 len = s->cfg.bus_width / 8;
             }
         } else {
-            address_space_read(s->dma_as, src_addr, s->attr, s->buf, len);
+            address_space_read(&s->dma_as, src_addr, s->attr, s->buf, len);
             if (burst_type == AXI_BURST_INCR) {
                 src_addr += len;
             }
@@ -710,7 +719,7 @@ static uint64_t zdma_read(void *opaque, hwaddr addr, unsigned size)
     RegisterInfo *r = &s->regs_info[addr / 4];
 
     if (!r->data) {
-        gchar *path = object_get_canonical_path(OBJECT(s));
+        char *path = object_get_canonical_path(OBJECT(s));
         qemu_log("%s: Decode error: read from %" HWADDR_PRIx "\n",
                  path,
                  addr);
@@ -729,7 +738,7 @@ static void zdma_write(void *opaque, hwaddr addr, uint64_t value,
     RegisterInfo *r = &s->regs_info[addr / 4];
 
     if (!r->data) {
-        gchar *path = object_get_canonical_path(OBJECT(s));
+        char *path = object_get_canonical_path(OBJECT(s));
         qemu_log("%s: Decode error: write to %" HWADDR_PRIx "=%" PRIx64 "\n",
                  path,
                  addr, value);
@@ -756,6 +765,12 @@ static void zdma_realize(DeviceState *dev, Error **errp)
     XlnxZDMA *s = XLNX_ZDMA(dev);
     unsigned int i;
 
+    if (!s->dma_mr) {
+        error_setg(errp, TYPE_XLNX_ZDMA " 'dma' link not set");
+        return;
+    }
+    address_space_init(&s->dma_as, s->dma_mr, "zdma-dma");
+
     for (i = 0; i < ARRAY_SIZE(zdma_regs_info); ++i) {
         RegisterInfo *r = &s->regs_info[zdma_regs_info[i].addr / 4];
 
@@ -768,12 +783,6 @@ static void zdma_realize(DeviceState *dev, Error **errp)
         };
     }
 
-    if (s->dma_mr) {
-        s->dma_as = g_malloc0(sizeof(AddressSpace));
-        address_space_init(s->dma_as, s->dma_mr, NULL);
-    } else {
-        s->dma_as = &address_space_memory;
-    }
     s->attr = MEMTXATTRS_UNSPECIFIED;
 }
 
@@ -790,15 +799,13 @@ static void zdma_init(Object *obj)
     object_property_add_link(obj, "dma", TYPE_MEMORY_REGION,
                              (Object **)&s->dma_mr,
                              qdev_prop_allow_set_link_before_realize,
-                             OBJ_PROP_LINK_STRONG,
-                             &error_abort);
+                             OBJ_PROP_LINK_STRONG);
 }
 
 static const VMStateDescription vmstate_zdma = {
     .name = TYPE_XLNX_ZDMA,
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
     .fields = (VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, XlnxZDMA, ZDMA_R_MAX),
         VMSTATE_UINT32(state, XlnxZDMA),

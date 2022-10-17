@@ -110,13 +110,13 @@ static int bochs_open(BlockDriverState *bs, QDict *options, int flags,
         return ret;
     }
 
-    bs->file = bdrv_open_child(NULL, options, "file", bs, &child_file,
-                               false, errp);
+    bs->file = bdrv_open_child(NULL, options, "file", bs, &child_of_bds,
+                               BDRV_CHILD_IMAGE, false, errp);
     if (!bs->file) {
         return -EINVAL;
     }
 
-    ret = bdrv_pread(bs->file, 0, &bochs, sizeof(bochs));
+    ret = bdrv_pread(bs->file, 0, sizeof(bochs), &bochs, 0);
     if (ret < 0) {
         return ret;
     }
@@ -150,8 +150,8 @@ static int bochs_open(BlockDriverState *bs, QDict *options, int flags,
         return -ENOMEM;
     }
 
-    ret = bdrv_pread(bs->file, le32_to_cpu(bochs.header), s->catalog_bitmap,
-                     s->catalog_size * 4);
+    ret = bdrv_pread(bs->file, le32_to_cpu(bochs.header), s->catalog_size * 4,
+                     s->catalog_bitmap, 0);
     if (ret < 0) {
         goto fail;
     }
@@ -224,8 +224,8 @@ static int64_t seek_to_sector(BlockDriverState *bs, int64_t sector_num)
         (s->extent_blocks + s->bitmap_blocks));
 
     /* read in bitmap for current extent */
-    ret = bdrv_pread(bs->file, bitmap_offset + (extent_offset / 8),
-                     &bitmap_entry, 1);
+    ret = bdrv_pread(bs->file, bitmap_offset + (extent_offset / 8), 1,
+                     &bitmap_entry, 0);
     if (ret < 0) {
         return ret;
     }
@@ -238,8 +238,8 @@ static int64_t seek_to_sector(BlockDriverState *bs, int64_t sector_num)
 }
 
 static int coroutine_fn
-bochs_co_preadv(BlockDriverState *bs, uint64_t offset, uint64_t bytes,
-                QEMUIOVector *qiov, int flags)
+bochs_co_preadv(BlockDriverState *bs, int64_t offset, int64_t bytes,
+                QEMUIOVector *qiov, BdrvRequestFlags flags)
 {
     BDRVBochsState *s = bs->opaque;
     uint64_t sector_num = offset >> BDRV_SECTOR_BITS;
@@ -297,10 +297,11 @@ static BlockDriver bdrv_bochs = {
     .instance_size	= sizeof(BDRVBochsState),
     .bdrv_probe		= bochs_probe,
     .bdrv_open		= bochs_open,
-    .bdrv_child_perm     = bdrv_format_default_perms,
+    .bdrv_child_perm     = bdrv_default_perms,
     .bdrv_refresh_limits = bochs_refresh_limits,
     .bdrv_co_preadv = bochs_co_preadv,
     .bdrv_close		= bochs_close,
+    .is_format          = true,
 };
 
 static void bdrv_bochs_init(void)

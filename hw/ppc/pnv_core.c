@@ -5,7 +5,7 @@
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public License
- * as published by the Free Software Foundation; either version 2 of
+ * as published by the Free Software Foundation; either version 2.1 of
  * the License, or (at your option) any later version.
  *
  * This library is distributed in the hope that it will be useful, but
@@ -29,6 +29,7 @@
 #include "hw/ppc/pnv_xscom.h"
 #include "hw/ppc/xics.h"
 #include "hw/qdev-properties.h"
+#include "helper_regs.h"
 
 static const char *pnv_core_cpu_typename(PnvCore *pc)
 {
@@ -55,8 +56,8 @@ static void pnv_core_cpu_reset(PnvCore *pc, PowerPCCPU *cpu)
     env->gpr[3] = PNV_FDT_ADDR;
     env->nip = 0x10;
     env->msr |= MSR_HVB; /* Hypervisor mode */
-
     env->spr[SPR_HRMOR] = pc->hrmor;
+    hreg_compute_hflags(env);
 
     pcc->intc_reset(pc->chip, cpu);
 }
@@ -173,9 +174,7 @@ static void pnv_core_cpu_realize(PnvCore *pc, PowerPCCPU *cpu, Error **errp)
     Error *local_err = NULL;
     PnvChipClass *pcc = PNV_CHIP_GET_CLASS(pc->chip);
 
-    object_property_set_bool(OBJECT(cpu), true, "realized", &local_err);
-    if (local_err) {
-        error_propagate(errp, local_err);
+    if (!qdev_realize(DEVICE(cpu), NULL, errp)) {
         return;
     }
 
@@ -232,7 +231,7 @@ static void pnv_core_realize(DeviceState *dev, Error **errp)
         pc->threads[i] = POWERPC_CPU(obj);
 
         snprintf(name, sizeof(name), "thread[%d]", i);
-        object_property_add_child(OBJECT(pc), name, obj, &error_abort);
+        object_property_add_child(OBJECT(pc), name, obj);
 
         cpu->machine_data = g_new0(PnvCPUState, 1);
 
@@ -275,7 +274,7 @@ static void pnv_core_cpu_unrealize(PnvCore *pc, PowerPCCPU *cpu)
     object_unparent(OBJECT(cpu));
 }
 
-static void pnv_core_unrealize(DeviceState *dev, Error **errp)
+static void pnv_core_unrealize(DeviceState *dev)
 {
     PnvCore *pc = PNV_CORE(dev);
     CPUCore *cc = CPU_CORE(dev);
@@ -348,7 +347,7 @@ static const TypeInfo pnv_core_infos[] = {
     DEFINE_PNV_CORE_TYPE(power8, "power8_v2.0"),
     DEFINE_PNV_CORE_TYPE(power8, "power8nvl_v1.0"),
     DEFINE_PNV_CORE_TYPE(power9, "power9_v2.0"),
-    DEFINE_PNV_CORE_TYPE(power10, "power10_v1.0"),
+    DEFINE_PNV_CORE_TYPE(power10, "power10_v2.0"),
 };
 
 DEFINE_TYPES(pnv_core_infos)
@@ -408,13 +407,13 @@ static void pnv_quad_realize(DeviceState *dev, Error **errp)
     PnvQuad *eq = PNV_QUAD(dev);
     char name[32];
 
-    snprintf(name, sizeof(name), "xscom-quad.%d", eq->id);
+    snprintf(name, sizeof(name), "xscom-quad.%d", eq->quad_id);
     pnv_xscom_region_init(&eq->xscom_regs, OBJECT(dev), &pnv_quad_xscom_ops,
                           eq, name, PNV9_XSCOM_EQ_SIZE);
 }
 
 static Property pnv_quad_properties[] = {
-    DEFINE_PROP_UINT32("id", PnvQuad, id, 0),
+    DEFINE_PROP_UINT32("quad-id", PnvQuad, quad_id, 0),
     DEFINE_PROP_END_OF_LIST(),
 };
 

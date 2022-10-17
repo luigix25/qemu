@@ -12,7 +12,7 @@ use Term::ANSIColor qw(:constants);
 my $P = $0;
 $P =~ s@.*/@@g;
 
-our $SrcFile    = qr{\.(?:h|c|cpp|s|S|pl|py|sh)$};
+our $SrcFile    = qr{\.(?:(h|c)(\.inc)?|cpp|s|S|pl|py|sh)$};
 
 my $V = '0.31';
 
@@ -35,8 +35,6 @@ my $summary_file = 0;
 my $root;
 my %debug;
 my $help = 0;
-my $acpi_testexpected;
-my $acpi_nontestexpected;
 
 sub help {
 	my ($exitcode) = @_;
@@ -51,7 +49,7 @@ Version: $V
 
 Options:
   -q, --quiet                quiet
-  --no-tree                  run without a kernel tree
+  --no-tree                  run without a qemu tree
   --no-signoff               do not check for 'Signed-off-by' line
   --patch                    treat FILE as patchfile
   --branch                   treat args as GIT revision list
@@ -59,7 +57,7 @@ Options:
   --terse                    one line per report
   -f, --file                 treat FILE as regular source file
   --strict                   fail if only warnings are found
-  --root=PATH                PATH to the kernel tree root
+  --root=PATH                PATH to the qemu tree root
   --no-summary               suppress the per-file summary
   --mailback                 only produce a report in case of warnings/errors
   --summary-file             include the filename in summary
@@ -205,7 +203,7 @@ if ($tree) {
 	}
 
 	if (!defined $root) {
-		print "Must be run from the top-level dir. of a kernel tree\n";
+		print "Must be run from the top-level dir. of a qemu tree\n";
 		exit(2);
 	}
 }
@@ -225,11 +223,11 @@ our $Sparse	= qr{
 our $Attribute	= qr{
 			const|
 			volatile|
-			QEMU_NORETURN|
-			QEMU_WARN_UNUSED_RESULT|
-			QEMU_SENTINEL|
+			G_NORETURN|
+			G_GNUC_WARN_UNUSED_RESULT|
+			G_GNUC_NULL_TERMINATED|
 			QEMU_PACKED|
-			GCC_FMT_ATTR
+			G_GNUC_PRINTF
 		  }x;
 our $Modifier;
 our $Inline	= qr{inline};
@@ -309,7 +307,6 @@ our @typeList = (
 	qr{target_(?:u)?long},
 	qr{hwaddr},
         # external libraries
-	qr{xml${Ident}},
 	qr{xen\w+_handle},
 	# Glib definitions
 	qr{gchar},
@@ -394,14 +391,19 @@ if ($chk_branch) {
 
 	close $HASH;
 
-	die "$P: no revisions returned for revlist '$chk_branch'\n"
+	die "$P: no revisions returned for revlist '$ARGV[0]'\n"
 	    unless @patches;
 
 	my $i = 1;
 	my $num_patches = @patches;
 	for my $hash (@patches) {
 		my $FILE;
-		open($FILE, '-|', "git", "show", $hash) ||
+		open($FILE, '-|', "git",
+                     "-c", "diff.renamelimit=0",
+                     "-c", "diff.renames=True",
+                     "-c", "diff.algorithm=histogram",
+                     "show",
+                     "--patch-with-stat", $hash) ||
 			die "$P: git show $hash - $!\n";
 		while (<$FILE>) {
 			chomp;
@@ -1261,21 +1263,23 @@ sub WARN {
 # According to tests/qtest/bios-tables-test.c: do not
 # change expected file in the same commit with adding test
 sub checkfilename {
-	my ($name) = @_;
-	if ($name =~ m#^tests/data/acpi/# and
-		# make exception for a shell script that rebuilds the files
-		not $name =~ m#^\.sh$# or
-		$name =~ m#^tests/qtest/bios-tables-test-allowed-diff.h$#) {
-		$acpi_testexpected = $name;
-	} else {
-		$acpi_nontestexpected = $name;
+	my ($name, $acpi_testexpected, $acpi_nontestexpected) = @_;
+
+        # Note: shell script that rebuilds the expected files is in the same
+        # directory as files themselves.
+        # Note: allowed diff list can be changed both when changing expected
+        # files and when changing tests.
+	if ($name =~ m#^tests/data/acpi/# and not $name =~ m#^\.sh$#) {
+		$$acpi_testexpected = $name;
+	} elsif ($name !~ m#^tests/qtest/bios-tables-test-allowed-diff.h$#) {
+		$$acpi_nontestexpected = $name;
 	}
-	if (defined $acpi_testexpected and defined $acpi_nontestexpected) {
+	if (defined $$acpi_testexpected and defined $$acpi_nontestexpected) {
 		ERROR("Do not add expected files together with tests, " .
 		      "follow instructions in " .
 		      "tests/qtest/bios-tables-test.c: both " .
-		      $acpi_testexpected . " and " .
-		      $acpi_nontestexpected . " found\n");
+		      $$acpi_testexpected . " and " .
+		      $$acpi_nontestexpected . " found\n");
 	}
 }
 
@@ -1324,6 +1328,9 @@ sub process {
 	my %suppress_ifbraces;
 	my %suppress_whiletrailers;
 	my %suppress_export;
+
+        my $acpi_testexpected;
+        my $acpi_nontestexpected;
 
 	# Pre-scan the patch sanitizing the lines.
 
@@ -1454,11 +1461,11 @@ sub process {
 		if ($line =~ /^diff --git.*?(\S+)$/) {
 			$realfile = $1;
 			$realfile =~ s@^([^/]*)/@@ if (!$file);
-	                checkfilename($realfile);
+	                checkfilename($realfile, \$acpi_testexpected, \$acpi_nontestexpected);
 		} elsif ($line =~ /^\+\+\+\s+(\S+)/) {
 			$realfile = $1;
 			$realfile =~ s@^([^/]*)/@@ if (!$file);
-	                checkfilename($realfile);
+	                checkfilename($realfile, \$acpi_testexpected, \$acpi_nontestexpected);
 
 			$p1_prefix = $1;
 			if (!$file && $tree && $p1_prefix ne '' &&
@@ -1496,7 +1503,7 @@ sub process {
 			$is_patch = 1;
 		}
 
-		if ($line =~ /^Author: .*via Qemu-devel.*<qemu-devel\@nongnu.org>/) {
+		if ($line =~ /^(Author|From): .* via .*<qemu-devel\@nongnu.org>/) {
 		    ERROR("Author email address is mangled by the mailing list\n" . $herecurr);
 		}
 
@@ -1527,7 +1534,10 @@ sub process {
 		    ($line =~ /^(?:new|deleted) file mode\s*\d+\s*$/ ||
 		     $line =~ /^rename (?:from|to) [\w\/\.\-]+\s*$/ ||
 		     ($line =~ /\{\s*([\w\/\.\-]*)\s*\=\>\s*([\w\/\.\-]*)\s*\}/ &&
-		      (defined($1) || defined($2))))) {
+		      (defined($1) || defined($2)))) &&
+                      !(($realfile ne '') &&
+                        defined($acpi_testexpected) &&
+                        ($realfile eq $acpi_testexpected))) {
 			$reported_maintainer_file = 1;
 			WARN("added, moved or deleted file(s), does MAINTAINERS need updating?\n" . $herecurr);
 		}
@@ -1656,7 +1666,7 @@ sub process {
 # tabs are only allowed in assembly source code, and in
 # some scripts we imported from other projects.
 		next if ($realfile =~ /\.(s|S)$/);
-		next if ($realfile =~ /(checkpatch|get_maintainer|texi2pod)\.pl$/);
+		next if ($realfile =~ /(checkpatch|get_maintainer)\.pl$/);
 
 		if ($rawline =~ /^\+.*\t/) {
 			my $herevet = "$here\n" . cat_vet($rawline) . "\n";
@@ -1665,7 +1675,7 @@ sub process {
 		}
 
 # check we are in a valid C source file if not then ignore this hunk
-		next if ($realfile !~ /\.(h|c|cpp)$/);
+		next if ($realfile !~ /\.((h|c)(\.inc)?|cpp)$/);
 
 # Block comment styles
 
@@ -1867,7 +1877,7 @@ sub process {
 			substr($s, 0, length($c), '');
 
 			# Make sure we remove the line prefixes as we have
-			# none on the first line, and are going to readd them
+			# none on the first line, and are going to re-add them
 			# where necessary.
 			$s =~ s/\n./\n/gs;
 
@@ -2821,8 +2831,8 @@ sub process {
 		}
 
 # check for pointless casting of g_malloc return
-		if ($line =~ /\*\s*\)\s*g_(try)?(m|re)alloc(0?)(_n)?\b/) {
-			if ($2 == 'm') {
+		if ($line =~ /\*\s*\)\s*g_(try|)(m|re)alloc(0?)(_n)?\b/) {
+			if ($2 eq 'm') {
 				ERROR("unnecessary cast may hide bugs, use g_$1new$3 instead\n" . $herecurr);
 			} else {
 				ERROR("unnecessary cast may hide bugs, use g_$1renew$3 instead\n" . $herecurr);
@@ -2837,6 +2847,11 @@ sub process {
 # recommend g_path_get_* over g_strdup(basename/dirname(...))
 		if ($line =~ /\bg_strdup\s*\(\s*(basename|dirname)\s*\(/) {
 			WARN("consider using g_path_get_$1() in preference to g_strdup($1())\n" . $herecurr);
+		}
+
+# enforce g_memdup2() over g_memdup()
+		if ($line =~ /\bg_memdup\s*\(/) {
+			ERROR("use g_memdup2() instead of unsafe g_memdup()\n" . $herecurr);
 		}
 
 # recommend qemu_strto* over strto* for numeric conversions
@@ -2867,6 +2882,7 @@ sub process {
 				SCSIBusInfo|
 				SCSIReqOps|
 				Spice[A-Z][a-zA-Z0-9]*Interface|
+				TypeInfo|
 				USBDesc[A-Z][a-zA-Z0-9]*|
 				VhostOps|
 				VMStateDescription|
@@ -2877,14 +2893,20 @@ sub process {
 				$herecurr);
 		}
 
-# check for %L{u,d,i} in strings
+# format strings checks
 		my $string;
 		while ($line =~ /(?:^|")([X\t]*)(?:"|$)/g) {
 			$string = substr($rawline, $-[1], $+[1] - $-[1]);
 			$string =~ s/%%/__/g;
+			# check for %L{u,d,i} in strings
 			if ($string =~ /(?<!%)%L[udi]/) {
 				ERROR("\%Ld/%Lu are not-standard C, use %lld/%llu\n" . $herecurr);
-				last;
+			}
+			# check for %# or %0# in printf-style format strings
+			if ($string =~ /(?<!%)%0?#/) {
+				ERROR("Don't use '#' flag of printf format " .
+				      "('%#') in format strings, use '0x' " .
+				      "prefix instead\n" . $herecurr);
 			}
 		}
 
@@ -2952,10 +2974,10 @@ sub process {
 			ERROR("use memset() instead of bzero()\n" . $herecurr);
 		}
 		if ($line =~ /\bgetpagesize\(\)/) {
-			ERROR("use qemu_real_host_page_size instead of getpagesize()\n" . $herecurr);
+			ERROR("use qemu_real_host_page_size() instead of getpagesize()\n" . $herecurr);
 		}
 		if ($line =~ /\bsysconf\(_SC_PAGESIZE\)/) {
-			ERROR("use qemu_real_host_page_size instead of sysconf(_SC_PAGESIZE)\n" . $herecurr);
+			ERROR("use qemu_real_host_page_size() instead of sysconf(_SC_PAGESIZE)\n" . $herecurr);
 		}
 		my $non_exit_glib_asserts = qr{g_assert_cmpstr|
 						g_assert_cmpint|
@@ -3002,7 +3024,7 @@ sub process {
 		return 1;
 	}
 
-	if (!$is_patch) {
+	if (!$is_patch && $filename !~ /cover-letter\.patch$/) {
 		ERROR("Does not appear to be a unified-diff format patch\n");
 	}
 

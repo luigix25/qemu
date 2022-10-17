@@ -1,9 +1,14 @@
 # -*- mode: python -*-
+# vim: filetype=python
 #
 # Copyright (C) 2015-2019 Zoltán Kővágó <DirtY.iCE.hu@gmail.com>
 #
 # This work is licensed under the terms of the GNU GPL, version 2 or later.
 # See the COPYING file in the top-level directory.
+
+##
+# = Audio
+##
 
 ##
 # @AudiodevPerDirectionOptions:
@@ -153,6 +158,55 @@
     '*latency': 'uint32' } }
 
 ##
+# @AudiodevJackPerDirectionOptions:
+#
+# Options of the JACK backend that are used for both playback and
+# recording.
+#
+# @server-name: select from among several possible concurrent server instances
+#               (default: environment variable $JACK_DEFAULT_SERVER if set, else "default")
+#
+# @client-name: the client name to use. The server will modify this name to
+#               create a unique variant, if needed unless @exact-name is true (default: the
+#               guest's name)
+#
+# @connect-ports: if set, a regular expression of JACK client port name(s) to
+#                 monitor for and automatically connect to
+#
+# @start-server: start a jack server process if one is not already present
+#                (default: false)
+#
+# @exact-name: use the exact name requested otherwise JACK automatically
+#              generates a unique one, if needed (default: false)
+#
+# Since: 5.1
+##
+{ 'struct': 'AudiodevJackPerDirectionOptions',
+  'base': 'AudiodevPerDirectionOptions',
+  'data': {
+    '*server-name':   'str',
+    '*client-name':   'str',
+    '*connect-ports': 'str',
+    '*start-server':  'bool',
+    '*exact-name':    'bool' } }
+
+##
+# @AudiodevJackOptions:
+#
+# Options of the JACK audio backend.
+#
+# @in: options of the capture stream
+#
+# @out: options of the playback stream
+#
+# Since: 5.1
+##
+{ 'struct': 'AudiodevJackOptions',
+  'data': {
+    '*in':  'AudiodevJackPerDirectionOptions',
+    '*out': 'AudiodevJackPerDirectionOptions' } }
+
+##
 # @AudiodevOssPerDirectionOptions:
 #
 # Options of the OSS backend that are used for both playback and
@@ -249,6 +303,37 @@
     '*server': 'str' } }
 
 ##
+# @AudiodevSdlPerDirectionOptions:
+#
+# Options of the SDL audio backend that are used for both playback and
+# recording.
+#
+# @buffer-count: number of buffers (default 4)
+#
+# Since: 6.0
+##
+{ 'struct': 'AudiodevSdlPerDirectionOptions',
+  'base': 'AudiodevPerDirectionOptions',
+  'data': {
+    '*buffer-count': 'uint32' } }
+
+##
+# @AudiodevSdlOptions:
+#
+# Options of the SDL audio backend.
+#
+# @in: options of the recording stream
+#
+# @out: options of the playback stream
+#
+# Since: 6.0
+##
+{ 'struct': 'AudiodevSdlOptions',
+  'data': {
+    '*in':  'AudiodevSdlPerDirectionOptions',
+    '*out': 'AudiodevSdlPerDirectionOptions' } }
+
+##
 # @AudiodevWavOptions:
 #
 # Options of the wav audio backend.
@@ -266,7 +351,6 @@
     '*in':   'AudiodevPerDirectionOptions',
     '*out':  'AudiodevPerDirectionOptions',
     '*path': 'str' } }
-
 
 ##
 # @AudioFormat:
@@ -297,11 +381,13 @@
 #
 # An enumeration of possible audio backend drivers.
 #
+# @jack: JACK audio backend (since 5.1)
+#
 # Since: 4.0
 ##
 { 'enum': 'AudiodevDriver',
-  'data': [ 'none', 'alsa', 'coreaudio', 'dsound', 'oss', 'pa', 'sdl',
-            'spice', 'wav' ] }
+  'data': [ 'none', 'alsa', 'coreaudio', 'dbus', 'dsound', 'jack', 'oss', 'pa',
+            'sdl', 'spice', 'wav' ] }
 
 ##
 # @Audiodev:
@@ -326,9 +412,11 @@
     'none':      'AudiodevGenericOptions',
     'alsa':      'AudiodevAlsaOptions',
     'coreaudio': 'AudiodevCoreaudioOptions',
+    'dbus':      'AudiodevGenericOptions',
     'dsound':    'AudiodevDsoundOptions',
+    'jack':      'AudiodevJackOptions',
     'oss':       'AudiodevOssOptions',
     'pa':        'AudiodevPaOptions',
-    'sdl':       'AudiodevGenericOptions',
+    'sdl':       'AudiodevSdlOptions',
     'spice':     'AudiodevGenericOptions',
     'wav':       'AudiodevWavOptions' } }

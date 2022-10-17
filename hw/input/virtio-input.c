@@ -257,8 +257,7 @@ static void virtio_input_device_realize(DeviceState *dev, Error **errp)
     vinput->cfg_size += 8;
     assert(vinput->cfg_size <= sizeof(virtio_input_config));
 
-    virtio_init(vdev, "virtio-input", VIRTIO_ID_INPUT,
-                vinput->cfg_size);
+    virtio_init(vdev, VIRTIO_ID_INPUT, vinput->cfg_size);
     vinput->evt = virtio_add_queue(vdev, 64, virtio_input_handle_evt);
     vinput->sts = virtio_add_queue(vdev, 64, virtio_input_handle_sts);
 }
@@ -276,19 +275,14 @@ static void virtio_input_finalize(Object *obj)
     g_free(vinput->queue);
 }
 
-static void virtio_input_device_unrealize(DeviceState *dev, Error **errp)
+static void virtio_input_device_unrealize(DeviceState *dev)
 {
     VirtIOInputClass *vic = VIRTIO_INPUT_GET_CLASS(dev);
     VirtIODevice *vdev = VIRTIO_DEVICE(dev);
     VirtIOInput *vinput = VIRTIO_INPUT(dev);
-    Error *local_err = NULL;
 
     if (vic->unrealize) {
-        vic->unrealize(dev, &local_err);
-        if (local_err) {
-            error_propagate(errp, local_err);
-            return;
-        }
+        vic->unrealize(dev);
     }
     virtio_delete_queue(vinput->evt);
     virtio_delete_queue(vinput->sts);
