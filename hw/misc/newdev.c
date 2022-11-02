@@ -28,20 +28,25 @@
 #include "qemu/module.h"
 #include "qemu/sockets.h"
 #include "qapi/visitor.h"
+#include "qapi/error.h"
 
-//#include <sys/inotify.h>
 #include <errno.h>
-//#include <poll.h>
-
-//#include <sys/types.h> 
-//#include <sys/socket.h> 
 
 #include "hw/misc/bpf_injection_msg.h"
 #include "hw/core/cpu.h"
 
+#include "qapi/qmp/qnum.h"
+#include "qapi/qmp/qstring.h"
+
+/* qom-get and qom-set */
+/* This #include leads to recompilation of over 300 files each time. For now using forward declaration */
+//#include "qapi/qapi-commands-qom.h"
+void qmp_qom_set(const char *path, const char *property, QObject *value, Error **errp);
+QObject *qmp_qom_get(const char *path, const char *property, Error **errp);
+
 //Affinity part
 #include <sys/sysinfo.h>
-//#include <sched.h>
+
 #define MAX_CPU 64
 #define SET_SIZE CPU_ALLOC_SIZE(MAX_CPU)
 #define NEWDEV_DEVICE_ID 0x11ea
@@ -76,10 +81,18 @@
 #define NEWDEV_BUF_BOUNDARY             NEWDEV_BUF_SIZE + NEWDEV_REG_SIZE
 
 #define VCPU_PINNING_TYPE               1
+#define DYNAMIC_MEM_TYPE                2
 
 /* Data in Doorbell */
 #define NEWDEV_DOORBELL_RESULT_READY        1
 #define NEWDEV_DOORBELL_INJECTION_FINISHED  2
+
+#define VIRTIO_MEM_ID "/machine/peripheral/vm0"
+
+#define MEGA (1024*1024)
+#define GIGA (1024*MEGA)
+
+#define backoff_time 100
 
 // DEVICE BUFMMIO STRUCTURE. OFFSET IN #bytes/sizeof(uint32_t)
 
@@ -137,12 +150,25 @@ typedef struct {
     int listen_fd;  //listening socket fd
     int connect_fd; //connected socket fd (use for command exchange)
 
+    //For Dynamic Memory
+    uint64_t last_timeslot;
+    uint64_t global_counter;
+    uint64_t no_reset_counter;
+    uint64_t timeslot_duration;
+
+    uint64_t requested_ram;
+    uint64_t max_ram;
+
+    QEMUTimer timer;
+
 } NewdevState;
 
 static void newdev_raise_irq(NewdevState *newdev, uint32_t val);
 static void connected_handle_read(void *opaque);
 int map_hyperthread(cpu_set_t* set);
-
+bool increase_ram(NewdevState *newdev);
+bool decrease_ram(NewdevState *newdev);
+bool send_ram_request(uint64_t requested_size);
 
 int map_hyperthread(cpu_set_t* set){
     //Modifies cpu_set only if one cpu is set in 
@@ -337,18 +363,18 @@ static void connected_handle_read(void *opaque){
 
 static void newdev_raise_irq(NewdevState *newdev, uint32_t val){
     newdev->irq_status |= val;
-    DBG("raise irq\tirq_status=%x", newdev->irq_status);
+    //DBG("raise irq\tirq_status=%x", newdev->irq_status);
     if (newdev->irq_status) {
-        DBG("raise irq\tinside if");
+        //DBG("raise irq\tinside if");
         pci_set_irq(&newdev->pdev, 1);        
     }
 }
 
 static void newdev_lower_irq(NewdevState *newdev, uint32_t val){
     newdev->irq_status &= ~val;
-    DBG("lower irq\tirq_status=%x", newdev->irq_status);
+    //DBG("lower irq\tirq_status=%x", newdev->irq_status);
     if (!newdev->irq_status) {
-        DBG("lower irq\tinside if");
+        //DBG("lower irq\tinside if");
         pci_set_irq(&newdev->pdev, 0);
     }
 }
@@ -417,14 +443,118 @@ static void vcpu_pinning(NewdevState *newdev, uint64_t* ptr, uint32_t size){
 
     exit:
 
-    //Signaling that processing of the data was completed
-    newdev_raise_irq(newdev,PROGRAM_INJECTION_RESULT);
-
     CPU_FREE(cpu_set);
 
 
 }
 
+bool send_ram_request(uint64_t requested_size){
+    QNum *number = qnum_from_uint(requested_size);
+    const char *qom_path = VIRTIO_MEM_ID;
+    Error *err = NULL;
+
+    qmp_qom_set(qom_path, "requested-size", (QObject *)number, &err);
+    return (err != NULL);
+
+}
+
+bool decrease_ram(NewdevState *newdev){
+    uint64_t ram_step = 256 * MEGA;
+
+    //Someone can modify requested-size from outside
+    Error *err = NULL;
+    QNum *qnum = (QNum*) qmp_qom_get(VIRTIO_MEM_ID,"requested-size",&err);
+    uint64_t current_requested_ram = qnum_get_uint(qnum);
+    newdev->requested_ram = current_requested_ram;
+
+    if(newdev->requested_ram == 0){
+        DBG("no more ram to deallocate!");
+        return false;
+    }
+
+    if(newdev->requested_ram < ram_step){
+        newdev->requested_ram = 0;
+    } else {
+        newdev->requested_ram -= ram_step;
+    }
+
+    DBG("[DECREASE] Requesting RAM %luM",(newdev->requested_ram/MEGA));
+    return send_ram_request(newdev->requested_ram);
+}
+
+bool increase_ram(NewdevState *newdev){
+
+    uint64_t ram_step = 256 * MEGA;
+
+    //Someone can modify requested-size from outside
+    Error *err = NULL;
+    QNum *qnum = (QNum*) qmp_qom_get(VIRTIO_MEM_ID,"requested-size",&err);
+    uint64_t current_requested_ram = qnum_get_uint(qnum);
+    newdev->requested_ram = current_requested_ram;
+
+    if(newdev->requested_ram == newdev->max_ram){
+        DBG("no more ram to allocate!");
+        return false;
+    }
+
+    if(newdev->requested_ram + ram_step <= newdev->max_ram){
+        newdev->requested_ram += ram_step;
+    } else if(newdev->requested_ram + ram_step > newdev->max_ram){
+        newdev->requested_ram = newdev->max_ram;
+    }
+
+    DBG("[INCREASE] Requesting RAM %luM",(newdev->requested_ram/MEGA));
+    return send_ram_request(newdev->requested_ram);
+
+}
+
+static void dynamic_memory(NewdevState *newdev, void* ptr, uint32_t size){
+
+    typedef struct {
+        uint64_t timeslot_start;
+        uint64_t timeslot_duration;
+        uint64_t global_threshold;
+        uint64_t cpu;
+        uint64_t counter;
+    } counter_t;
+
+    counter_t *counter = (counter_t *)ptr;
+
+    newdev->timeslot_duration = counter->timeslot_duration;
+
+    DBG("%lu %lu %lu\n",counter->timeslot_duration,counter->cpu,counter->counter);
+
+    if(newdev->last_timeslot == 0){ //first message
+        newdev->last_timeslot = counter->timeslot_start;
+        newdev->global_counter = counter->counter;
+    } else if(newdev->last_timeslot <= counter->timeslot_start || newdev->last_timeslot < counter->timeslot_start - counter->timeslot_duration){
+        //Same start, or unaligned start; ex: last_time_slot 100, receviced 150 with slot duration 100
+        newdev->global_counter += counter->counter;
+    } else { /* Too long since last swap; Did not go over the threshold */
+        newdev->global_counter = counter->counter;
+        newdev->last_timeslot = counter->timeslot_start;
+        newdev->no_reset_counter = 0;
+    }
+
+    DBG("-----------------");
+    //DBG("timeslot_start : %lu",counter->timeslot_start);
+    //DBG("cpu            : %lu",counter->cpu);
+    DBG("global counter : %lu",newdev->global_counter);
+    DBG("no_rst counter : %lu",newdev->no_reset_counter);
+    DBG("-----------------\n");
+
+    if(newdev->global_counter > counter->global_threshold){
+        newdev->no_reset_counter += newdev->global_counter;
+        newdev->last_timeslot = 0;
+        newdev->global_counter = 0;
+        increase_ram(newdev);
+    }
+
+    int64_t now = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
+    //If for 100 time slots no local threshold is triggered, ram is reduced
+    timer_mod(&newdev->timer,now+backoff_time*counter->timeslot_duration);
+
+}
 // 64 bits
 /* +-----------------------------+*/
 /* |            Type             |*/  //vCPU Pinning and so on
@@ -444,8 +574,12 @@ static void handle_doorbell(NewdevState *newdev, uint32_t value){
             uint64_t size = *(ptr+1);
 
             if(type == VCPU_PINNING_TYPE)
-                return vcpu_pinning(newdev,ptr+2,size);
-            break;
+                vcpu_pinning(newdev,ptr+2,size);
+            else if(type == DYNAMIC_MEM_TYPE)
+                dynamic_memory(newdev,ptr+2,size);
+
+            //Signaling that processing of the data was completed
+            return newdev_raise_irq(newdev,PROGRAM_INJECTION_RESULT);
         }
         case NEWDEV_DOORBELL_INJECTION_FINISHED:
             newdev->user_reading = false;
@@ -471,7 +605,7 @@ static void write_registers(NewdevState *newdev, uint32_t index, uint32_t val){
             break;
         case 2:
             //doorbell region: write of the results completed
-            DBG("doorbell in device!");
+            //DBG("doorbell in device!");
             handle_doorbell(newdev,val);
             break;
         default:
@@ -583,6 +717,21 @@ static int make_socket(uint16_t port){
   return sock;
 }
 
+static void timer_callback(void *opaque){
+
+    NewdevState *newdev = (NewdevState*)opaque;
+    if(decrease_ram(newdev) == false) //no more ram to deallocate
+        return;
+
+    //The timer is in use
+    if(timer_pending(&newdev->timer))
+        return;
+
+    int64_t now = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
+    timer_mod(&newdev->timer,now+backoff_time*newdev->timeslot_duration);
+
+}
+
 static void newdev_realize(PCIDevice *pdev, Error **errp)
 {
     NewdevState *newdev = NEWDEV(pdev);
@@ -601,6 +750,12 @@ static void newdev_realize(PCIDevice *pdev, Error **errp)
     //set_fd_handler?
     newdev->listen_fd = -1;
     newdev->connect_fd = -1;
+
+    newdev->last_timeslot = 0;
+    newdev->global_counter = 0;
+
+    //TODO: rimuovere DEBUG
+    newdev->no_reset_counter = 0;
 
     newdev->user_reading = false;
 
@@ -624,10 +779,32 @@ static void newdev_realize(PCIDevice *pdev, Error **errp)
     
     DBG("qemu listen_fd added");
 
+    /* For vCPU Pinning */
 
     for(int i=0;i<MAX_CPU;i++)
         newdev->vCPU_counter[i] = 0;
 
+    /* For Dynamic RAM */
+    //TODO: va fatta lazy, questo codice potrebbe crashare se virtio-mem viene caricato DOPO di me!!!!!!
+    Error *err = NULL;
+
+    QString *qstring = (QString *)qmp_qom_get(VIRTIO_MEM_ID,"memdev",&err);
+
+    if(err != NULL){
+        error_reportf_err(err,"Error: ");
+        return;
+        //DBG("Errore! %s\n",err->msg);
+    }
+    
+    const char *qom_mem_backend_path = qstring_get_str(qstring);
+
+    QNum *qnum = (QNum *)qmp_qom_get(qom_mem_backend_path,"size",&err);
+    uint64_t max_ram = qnum_get_uint(qnum);
+    newdev->max_ram = max_ram;
+
+    DBG("max_ram: %lu MiB\n",newdev->max_ram/MEGA);
+
+    timer_init_ms(&newdev->timer, QEMU_CLOCK_VIRTUAL, timer_callback, newdev);
     DBG("**** device realized ****");
 
 }
@@ -644,6 +821,8 @@ static void newdev_uninit(PCIDevice *pdev)
         qemu_set_fd_handler(newdev->listen_fd, NULL, NULL, NULL);
         qemu_close(newdev->listen_fd);
     }
+
+    timer_del(&newdev->timer);
 
     DBG("**** device unrealized ****");
 }
