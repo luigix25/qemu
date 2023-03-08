@@ -82,6 +82,8 @@ QObject *qmp_qom_get(const char *path, const char *property, Error **errp);
 
 #define VCPU_PINNING_TYPE               1
 #define DYNAMIC_MEM_TYPE                2
+#define FIREWALL_TYPE                   3
+
 
 /* Data in Doorbell */
 #define NEWDEV_DOORBELL_RESULT_READY        1
@@ -454,12 +456,17 @@ bool send_ram_request(uint64_t requested_size){
     Error *err = NULL;
 
     qmp_qom_set(qom_path, "requested-size", (QObject *)number, &err);
-    return (err != NULL);
+    if(err != NULL){
+        DBG("Error requesting ram change!");
+        return false;
+    }
+    
+    return true;
 
 }
 
 bool decrease_ram(NewdevState *newdev){
-    uint64_t ram_step = 256 * MEGA;
+    uint64_t ram_step = 64 * MEGA;
 
     //Someone can modify requested-size from outside
     Error *err = NULL;
@@ -555,6 +562,51 @@ static void dynamic_memory(NewdevState *newdev, void* ptr, uint32_t size){
     timer_mod(&newdev->timer,now+backoff_time*counter->timeslot_duration);
 
 }
+
+static void firewall_op(NewdevState *newdev, void* ptr, uint32_t size){
+
+    enum rule {DROP, ACCEPT, UNKNOWN = -1};
+
+    #define MAX_STRLEN 20
+
+    typedef struct{
+        const char table_name[MAX_STRLEN];
+        const char chain_name[MAX_STRLEN];
+        uint32_t ip;
+        uint32_t rule;
+    } firewall_info_t;
+
+    firewall_info_t *rule = (firewall_info_t *)ptr;
+
+    const char *accept = "ACCEPT";
+    const char *drop = "DROP";
+
+    const char *rule_ptr;
+
+    if(rule->rule == DROP)
+        rule_ptr = drop;
+    else if(rule->rule == ACCEPT)
+        rule_ptr = accept;
+
+    uint8_t *ip_ptr = (uint8_t*) &rule->ip;
+
+    //destination address is hardcoded, chain is forced to FORWARD
+
+    char rule_buffer[200];
+    sprintf(rule_buffer,"iptables -t %s -A FORWARD -s %d.%d.%d.%d -j %s -d 192.168.3.4",rule->table_name,ip_ptr[0],ip_ptr[1],ip_ptr[2],ip_ptr[3],rule_ptr);
+
+    DBG("RULE: %s\n",rule_buffer);
+    //DBG("iptables -t %s -A %s -s %d.%d.%d.%d -j %s -d 192.168.3.4",rule->table_name,rule->chain_name,ip_ptr[0],ip_ptr[1],ip_ptr[2],ip_ptr[3],rule_ptr);
+
+    //DBG("IP: %x RULE: %d table: %s chain: %s",rule->ip,rule->rule,rule->table_name,rule->chain_name);
+
+
+
+    if(system(rule_buffer) < 0)
+        return;
+}
+
+
 // 64 bits
 /* +-----------------------------+*/
 /* |            Type             |*/  //vCPU Pinning and so on
@@ -577,6 +629,9 @@ static void handle_doorbell(NewdevState *newdev, uint32_t value){
                 vcpu_pinning(newdev,ptr+2,size);
             else if(type == DYNAMIC_MEM_TYPE)
                 dynamic_memory(newdev,ptr+2,size);
+            else if(type == FIREWALL_TYPE){
+                firewall_op(newdev,ptr+2,size);
+            }
 
             //Signaling that processing of the data was completed
             return newdev_raise_irq(newdev,PROGRAM_INJECTION_RESULT);
