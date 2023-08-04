@@ -1,4 +1,5 @@
 chardev_ss.add(files(
+  'char-ebpf.c',
   'char-fe.c',
   'char-file.c',
   'char-io.c',

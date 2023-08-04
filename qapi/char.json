@@ -464,7 +464,8 @@
             'vc',
             'ringbuf',
             # next one is just for compatibility
-            'memory' ] }
+            'memory',
+            'ebpf'] }
 
 ##
 # @ChardevFileWrapper:
@@ -610,7 +611,9 @@
             'vc': 'ChardevVCWrapper',
             'ringbuf': 'ChardevRingbufWrapper',
             # next one is just for compatibility
-            'memory': 'ChardevRingbufWrapper' } }
+            'memory': 'ChardevRingbufWrapper',
+            'ebpf': 'ChardevHostdevWrapper'
+            } }
 
 ##
 # @ChardevReturn:
