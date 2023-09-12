@@ -36,7 +36,7 @@ config EDU
 
 config NEWDEV
     bool
-    default y
+    default n
     depends on PCI
 
 config PCA9552
