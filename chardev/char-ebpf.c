@@ -1,11 +1,13 @@
 #include "qemu/osdep.h"
+#include "qemu/sockets.h"
+#include "qemu/option.h"
+#include "qapi/error.h"
 #include "chardev/char.h"
 #include "chardev/char-fe.h"
 #include "chardev/char-fd.h"
 #include "chardev/char-io.h"
 #include "io/channel-buffer.h"
 #include "io/net-listener.h"
-#include "qemu/sockets.h"
 #include "hw/misc/bpf_injection_msg.h"
 
 
@@ -73,12 +75,33 @@ static void hexdump(const void* data, size_t size){
 */
 static void char_ebpf_parse(QemuOpts *opts, ChardevBackend *backend, Error **errp){
     DBG("parse! %d",backend->type);
+    const char *port = qemu_opt_get(opts, "port");
+    const char *host = qemu_opt_get(opts, "host");
 
-    ChardevHostdev *dev;
+    if(!port){
+        error_setg(errp, "chardev: ebpf: no port given");
+    }
+
+    if(!host){
+        error_setg(errp, "chardev: socket: no host given");
+    }
+
+    ChardevEbpf *dev;
 
     backend->type = CHARDEV_BACKEND_KIND_EBPF;
-    dev = backend->u.ebpf.data = g_new0(ChardevHostdev, 1);
-    qemu_chr_parse_common(opts, qapi_ChardevHostdev_base(dev));
+    dev = backend->u.ebpf.data = g_new0(ChardevEbpf, 1);
+
+    SocketAddress *addr = g_new(SocketAddress, 1);
+
+    InetSocketAddress *inet;
+    addr->type = SOCKET_ADDRESS_TYPE_INET;
+    inet = &addr->u.inet;
+    inet->host = g_strdup(host);
+    inet->port = g_strdup(port);
+
+    dev->addr = addr;
+
+    //qemu_chr_parse_common(opts, qapi_ChardevSocket_base(dev));
 }
 
 
@@ -244,18 +267,14 @@ static void char_ebpf_open(Chardev *chr,
     eBPFChardev *bpf = EBPF_CHARDEV(chr);
     FDChardev *s = FD_CHARDEV(chr);
 
+    ChardevEbpf *device_backend = backend->u.ebpf.data;
     *be_opened = true;
 
     s->ioc_in = QIO_CHANNEL(qio_channel_buffer_new(4096));
     bpf->listener = qio_net_listener_new();
     qio_net_listener_set_name(bpf->listener, "ebpf-listener");
 
-    bpf->addr = g_new0(SocketAddress, 1);
-    InetSocketAddress *inet;
-    bpf->addr->type = SOCKET_ADDRESS_TYPE_INET;
-    inet = &bpf->addr->u.inet;
-    inet->host = g_strdup("127.0.0.1");
-    inet->port = g_strdup("9999");
+    bpf->addr = device_backend->addr;
 
     *errp = NULL;
 

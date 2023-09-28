@@ -288,6 +288,18 @@
   'base': 'ChardevCommon' }
 
 ##
+# @ChardevEbpf:
+#
+# Configuration info for ebpf chardev.
+#
+# @addr: socket address to listen on (server=true)
+#        or connect to (server=false)
+##
+{ 'struct': 'ChardevEbpf',
+  'data': { 'addr': 'SocketAddress'},
+  'base': 'ChardevCommon' }
+
+##
 # @ChardevUdp:
 #
 # Configuration info for datagram socket chardevs.
@@ -492,6 +504,14 @@
   'data': { 'data': 'ChardevSocket' } }
 
 ##
+# @ChardevEbpfWrapper:
+#
+# Since: 1.4
+##
+{ 'struct': 'ChardevEbpfWrapper',
+  'data': { 'data': 'ChardevEbpf' } }
+
+##
 # @ChardevUdpWrapper:
 #
 # Since: 1.5
@@ -612,7 +632,7 @@
             'ringbuf': 'ChardevRingbufWrapper',
             # next one is just for compatibility
             'memory': 'ChardevRingbufWrapper',
-            'ebpf': 'ChardevHostdevWrapper'
+            'ebpf': 'ChardevEbpfWrapper'
             } }
 
 ##
