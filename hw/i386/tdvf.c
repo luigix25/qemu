@@ -89,16 +89,7 @@ static TdvfMetadata *tdvf_get_metadata(void *flash_ptr, int size)
     return metadata;
 }
 
-static int tdvf_parse_and_check_section_entry(const TdvfSectionEntry *src,
-                                              TdxFirmwareEntry *entry)
-{
-    entry->data_offset = le32_to_cpu(src->DataOffset);
-    entry->data_len = le32_to_cpu(src->RawDataSize);
-    entry->address = le64_to_cpu(src->MemoryAddress);
-    entry->size = le64_to_cpu(src->MemoryDataSize);
-    entry->type = le32_to_cpu(src->Type);
-    entry->attributes = le32_to_cpu(src->Attributes);
-
+static int check_entry(TdxFirmwareEntry *entry) {
     /* sanity check */
     if (entry->size < entry->data_len) {
         error_report("Broken metadata RawDataSize 0x%x MemoryDataSize 0x%"PRIx64,
@@ -138,6 +129,19 @@ static int tdvf_parse_and_check_section_entry(const TdvfSectionEntry *src,
     }
 
     return 0;
+}
+
+static int tdvf_parse_and_check_section_entry(const TdvfSectionEntry *src,
+                                              TdxFirmwareEntry *entry)
+{
+    entry->data_offset = le32_to_cpu(src->DataOffset);
+    entry->data_len = le32_to_cpu(src->RawDataSize);
+    entry->address = le64_to_cpu(src->MemoryAddress);
+    entry->size = le64_to_cpu(src->MemoryDataSize);
+    entry->type = le32_to_cpu(src->Type);
+    entry->attributes = le32_to_cpu(src->Attributes);
+
+    return check_entry(entry);
 }
 
 int tdvf_parse_metadata(TdxFirmware *fw, void *flash_ptr, int size)
@@ -186,4 +190,26 @@ err:
     fw->entries = 0;
     g_free(fw->entries);
     return -EINVAL;
+}
+
+int tdvf_initialize_igvm(TdxFirmware *fw)
+{
+    /* IGVM will be processed in cgs_process_igvm() */
+    fw->nr_entries = 0;
+    fw->entries = NULL;
+    /* Use absolute addressing */
+    fw->mem_ptr = 0;
+    return 0;
+}
+
+int tdvf_add_metadata(TdxFirmware *fw, TdxFirmwareEntry *entry)
+{
+    TdxFirmwareEntry *e;
+
+    fw->entries = g_renew(TdxFirmwareEntry, fw->entries, ++fw->nr_entries);
+
+    e = &fw->entries[fw->nr_entries - 1];
+    *e = *entry;
+
+    return check_entry(e);
 }
