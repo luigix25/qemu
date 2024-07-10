@@ -426,10 +426,22 @@ static int qigvm_directive_vp_context(QIgvm *ctx, const uint8_t *header_data,
         (const IGVM_VHS_VP_CONTEXT *)header_data;
     IgvmHandle data_handle;
     uint8_t *data;
+    uint32_t data_size;
+    uint8_t *region;
     int result;
 
     if (!(vp_context->compatibility_mask & ctx->compatibility_mask)) {
         return 0;
+    }
+
+    /*
+     * Complete any other page processing first to ensure measurements
+     * are correct.
+     */
+    if (ctx->machine_state->cgs) {
+        if (qigvm_process_mem_page(ctx, NULL, errp)) {
+            return -1;
+        }
     }
 
     data_handle = igvm_get_header_data(ctx->file, IGVM_HEADER_SECTION_DIRECTIVE,
@@ -447,9 +459,26 @@ static int qigvm_directive_vp_context(QIgvm *ctx, const uint8_t *header_data,
         goto exit;
     }
 
+    data_size = igvm_get_buffer_size(ctx->file, data_handle);
+    if (data_size > IGVM_PAGE_SIZE_4K) {
+        error_setg(errp, "IGVM: VP context data size %u exceeds page size",
+                   data_size);
+        result = -1;
+        goto exit;
+    }
+
     if (ctx->machine_state->cgs) {
+        region = qigvm_prepare_memory(ctx, vp_context->gpa, IGVM_PAGE_SIZE_4K,
+                                    ctx->current_header_index, errp);
+        if (!region) {
+            return -1;
+        }
+        memset(region, 0, IGVM_PAGE_SIZE_4K);
+
+        memcpy(region, data, data_size);
+
         result = ctx->cgsc->set_guest_state(
-            vp_context->gpa, data, igvm_get_buffer_size(ctx->file, data_handle),
+            vp_context->gpa, region, IGVM_PAGE_SIZE_4K,
             CGS_PAGE_TYPE_VMSA, vp_context->vp_index, errp);
     } else if (target_arch() == SYS_EMU_TARGET_X86_64) {
         result = qigvm_x86_set_vp_context(data, vp_context->vp_index, errp);
