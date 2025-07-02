@@ -133,6 +133,7 @@ static NotifierWithReturnList register_vcpufd_changed_notifiers =
 static int map_kvm_run(KVMState *s, CPUState *cpu, Error **errp);
 static int map_kvm_dirty_gfns(KVMState *s, CPUState *cpu, Error **errp);
 static int vcpu_unmap_regions(KVMState *s, CPUState *cpu);
+static void kvm_alloc_vcpu_plane(CPUState *cpu, unsigned plane_id, int kvm_fd);
 
 struct KVMResampleFd {
     int gsi;
@@ -429,10 +430,16 @@ err:
 
 static void kvm_create_vcpu_internal(CPUState *cpu, KVMState *s, int kvm_fd)
 {
-    cpu->kvm_fd = kvm_fd;
+    if (cpu->kvm_plane_state[0] == NULL) {
+        kvm_alloc_vcpu_plane(cpu, 0, kvm_fd);
+    } else {
+        cpu_kvm_plane(cpu, 0)->kvm_fd = kvm_fd;
+    }
+
+    cpu->kvm_plane = 0;
     cpu->kvm_state = s;
     if (!s->guest_state_protected) {
-        cpu->vcpu_dirty = true;
+        cpu_kvm_plane(cpu, 0)->vcpu_dirty = true;
     }
     cpu->dirty_pages = 0;
     cpu->throttle_us_per_full = 0;
@@ -450,8 +457,8 @@ static int kvm_rebind_vcpus(Error **errp)
     CPU_FOREACH(cpu) {
         vcpu_id = kvm_arch_vcpu_id(cpu);
 
-        if (cpu->kvm_fd) {
-            close(cpu->kvm_fd);
+        if (cpu_kvm_plane(cpu, 0)->kvm_fd) {
+            close(cpu_kvm_plane(cpu, 0)->kvm_fd);
         }
 
         ret = kvm_arch_destroy_vcpu(cpu);
@@ -501,8 +508,9 @@ static int kvm_rebind_vcpus(Error **errp)
                              vcpu_id);
         }
 
-        close(cpu->kvm_vcpu_stats_fd);
-        cpu->kvm_vcpu_stats_fd = kvm_vcpu_ioctl(cpu, KVM_GET_STATS_FD, NULL);
+        close(cpu_kvm_plane(cpu, 0)->kvm_vcpu_stats_fd);
+        cpu_kvm_plane(cpu, 0)->kvm_vcpu_stats_fd =
+            kvm_vcpu_ioctl(cpu, KVM_GET_STATS_FD, NULL);
         kvm_init_cpu_signals(cpu);
     }
     trace_kvm_rebind_vcpus();
@@ -519,7 +527,7 @@ static void kvm_park_vcpu(CPUState *cpu)
 
     vcpu = g_malloc0(sizeof(*vcpu));
     vcpu->vcpu_id = kvm_arch_vcpu_id(cpu);
-    vcpu->kvm_fd = cpu->kvm_fd;
+    vcpu->kvm_fd = cpu_kvm_plane(cpu, 0)->kvm_fd;
     QLIST_INSERT_HEAD(&kvm_state->kvm_parked_vcpus, vcpu, node);
 }
 
@@ -550,6 +558,34 @@ static void kvm_reset_parked_vcpus(KVMState *s)
         kvm_arch_reset_parked_vcpu(cpu->vcpu_id, cpu->kvm_fd);
     }
 }
+
+static void kvm_alloc_vcpu_plane(CPUState *cpu, unsigned plane_id, int kvm_fd)
+{
+    struct KVMPlane *p = NULL;
+
+    if (cpu->kvm_plane_state[plane_id] != NULL) {
+        return;
+    }
+
+    p = g_malloc0(sizeof(struct KVMPlane));
+    p->kvm_fd = kvm_fd;
+
+    cpu->kvm_plane_state[plane_id] = p;
+}
+
+void kvm_create_vcpu_plane(CPUState *cpu, unsigned plane_id, int kvm_fd)
+{
+    int vcpu_fd = cpu_kvm_plane(cpu, 0)->kvm_fd;
+    int plane_fd = kvm_vm_plane_ioctl(cpu->kvm_state, plane_id, KVM_CREATE_VCPU, vcpu_fd);
+
+    if (plane_fd < 0) {
+        fprintf(stderr, "Failed to create plane vcpu\n");
+        abort();
+    }
+
+    kvm_alloc_vcpu_plane(cpu, plane_id, plane_fd);
+}
+
 
 /**
  * kvm_create_vcpu - Gets a parked KVM vCPU or creates a KVM vCPU
@@ -676,7 +712,7 @@ static int map_kvm_run(KVMState *s, CPUState *cpu, Error **errp)
     }
 
     cpu->kvm_run = mmap(NULL, mmap_size, PROT_READ | PROT_WRITE, MAP_SHARED,
-                        cpu->kvm_fd, 0);
+                        cpu_kvm_plane(cpu, 0)->kvm_fd, 0);
     if (cpu->kvm_run == MAP_FAILED) {
         ret = -errno;
         error_setg_errno(errp, ret,
@@ -700,7 +736,7 @@ static int map_kvm_dirty_gfns(KVMState *s, CPUState *cpu, Error **errp)
     /* Use MAP_SHARED to share pages with the kernel */
     cpu->kvm_dirty_gfns = mmap(NULL, s->kvm_dirty_ring_bytes,
                                PROT_READ | PROT_WRITE, MAP_SHARED,
-                               cpu->kvm_fd,
+                               cpu_kvm_plane(cpu, 0)->kvm_fd,
                                PAGE_SIZE * KVM_DIRTY_LOG_PAGE_OFFSET);
     if (cpu->kvm_dirty_gfns == MAP_FAILED) {
         ret = -errno;
@@ -747,7 +783,7 @@ int kvm_init_vcpu(CPUState *cpu, Error **errp)
                          "kvm_init_vcpu: kvm_arch_init_vcpu failed (%lu)",
                          kvm_arch_vcpu_id(cpu));
     }
-    cpu->kvm_vcpu_stats_fd = kvm_vcpu_ioctl(cpu, KVM_GET_STATS_FD, NULL);
+    cpu_kvm_plane(cpu, 0)->kvm_vcpu_stats_fd = kvm_vcpu_ioctl(cpu, KVM_GET_STATS_FD, NULL);
 
 err:
     return ret;
@@ -762,11 +798,17 @@ void kvm_close(void)
     }
 
     CPU_FOREACH(cpu) {
+        unsigned plane_id = KVM_MAX_PLANES;
         cpu_remove_sync(cpu);
-        close(cpu->kvm_fd);
-        cpu->kvm_fd = -1;
-        close(cpu->kvm_vcpu_stats_fd);
-        cpu->kvm_vcpu_stats_fd = -1;
+        do {
+            struct KVMPlane *plane;
+            plane_id--;
+            plane = cpu_kvm_plane(cpu, plane_id);
+            close(plane->kvm_fd);
+            plane->kvm_fd = -1;
+            close(plane->kvm_vcpu_stats_fd);
+            plane->kvm_vcpu_stats_fd = -1;
+        } while (plane_id != 0);
     }
 
     if (kvm_state && kvm_state->fd != -1) {
@@ -3238,7 +3280,9 @@ void kvm_flush_coalesced_mmio_buffer(void)
 
 static void do_kvm_cpu_synchronize_state(CPUState *cpu, run_on_cpu_data arg)
 {
-    if (!cpu->vcpu_dirty && !kvm_state->guest_state_protected) {
+    KVMPlane *plane = cpu_active_kvm_plane(cpu);
+
+    if (!plane->vcpu_dirty && !kvm_state->guest_state_protected) {
         Error *err = NULL;
         int ret = kvm_arch_get_registers(cpu, &err);
         if (ret) {
@@ -3252,13 +3296,15 @@ static void do_kvm_cpu_synchronize_state(CPUState *cpu, run_on_cpu_data arg)
             vm_stop(RUN_STATE_INTERNAL_ERROR);
         }
 
-        cpu->vcpu_dirty = true;
+        plane->vcpu_dirty = true;
     }
 }
 
 void kvm_cpu_synchronize_state(CPUState *cpu)
 {
-    if (!cpu->vcpu_dirty && !kvm_state->guest_state_protected) {
+    KVMPlane *plane = cpu_active_kvm_plane(cpu);
+
+    if (!plane->vcpu_dirty && !kvm_state->guest_state_protected) {
         run_on_cpu(cpu, do_kvm_cpu_synchronize_state, RUN_ON_CPU_NULL);
     }
 }
@@ -3278,7 +3324,7 @@ static bool kvm_cpu_synchronize_put(CPUState *cpu, KvmPutState state,
         return false;
     }
 
-    cpu->vcpu_dirty = false;
+    cpu_active_kvm_plane(cpu)->vcpu_dirty = false;
 
     return true;
 }
@@ -3320,7 +3366,7 @@ void kvm_cpu_synchronize_post_init(CPUState *cpu)
 
 static void do_kvm_cpu_synchronize_pre_loadvm(CPUState *cpu, run_on_cpu_data arg)
 {
-    cpu->vcpu_dirty = true;
+    cpu_active_kvm_plane(cpu)->vcpu_dirty = true;
 }
 
 void kvm_cpu_synchronize_pre_loadvm(CPUState *cpu)
@@ -3478,6 +3524,7 @@ out_unref:
 
 int kvm_cpu_exec(CPUState *cpu)
 {
+    KVMPlane *plane = cpu_active_kvm_plane(cpu);
     struct kvm_run *run = cpu->kvm_run;
     int ret, run_ret;
 
@@ -3493,7 +3540,7 @@ int kvm_cpu_exec(CPUState *cpu)
     do {
         MemTxAttrs attrs;
 
-        if (cpu->vcpu_dirty) {
+        if (plane->vcpu_dirty) {
             if (!kvm_cpu_synchronize_put(cpu, KVM_PUT_RUNTIME_STATE,
                                          "at runtime")) {
                 ret = -1;
@@ -3725,8 +3772,36 @@ int kvm_vm_plane_ioctl(KVMState *s, unsigned plane_id, unsigned long type, ...)
     return __vm_plane_ioctl(s, plane_id, type, arg);
 }
 
+static inline int __vcpu_plane_ioctl(KVMPlane *plane, unsigned long type, void *arg)
+{
+    return ioctl(plane->kvm_fd, type, arg);
+}
+
+int kvm_vcpu_plane_ioctl(CPUState *cpu, unsigned plane_id, unsigned long type, ...)
+{
+    KVMPlane *plane = cpu_kvm_plane(cpu, plane_id);
+    int ret;
+    void *arg;
+    va_list ap;
+
+    va_start(ap, type);
+    arg = va_arg(ap, void *);
+    va_end(ap);
+
+    trace_kvm_vcpu_plane_ioctl(cpu->cpu_index, plane_id, type, arg);
+    accel_cpu_ioctl_begin(cpu);
+    ret = __vcpu_plane_ioctl(plane, type, arg);
+    accel_cpu_ioctl_end(cpu);
+    if (ret == -1) {
+        ret = -errno;
+    }
+    return ret;
+}
+
 int kvm_vcpu_ioctl(CPUState *cpu, unsigned long type, ...)
 {
+    /* Most VCPU IOCTLs (including KVM_RUN) must happen on the Plane-0 FD */
+    KVMPlane *plane = cpu_kvm_plane(cpu, 0);
     int ret;
     void *arg;
     va_list ap;
@@ -3737,7 +3812,7 @@ int kvm_vcpu_ioctl(CPUState *cpu, unsigned long type, ...)
 
     trace_kvm_vcpu_ioctl(cpu->cpu_index, type, arg);
     accel_cpu_ioctl_begin(cpu);
-    ret = ioctl(cpu->kvm_fd, type, arg);
+    ret = __vcpu_plane_ioctl(plane, type, arg);
     accel_cpu_ioctl_end(cpu);
     if (ret == -1) {
         ret = -errno;
@@ -4731,7 +4806,7 @@ static void query_stats_schema(StatsSchemaList **result, StatsTarget target,
 
 static void query_stats_vcpu(CPUState *cpu, StatsArgs *kvm_stats_args)
 {
-    int stats_fd = cpu->kvm_vcpu_stats_fd;
+    int stats_fd = cpu_active_kvm_plane(cpu)->kvm_vcpu_stats_fd;
     Error *local_err = NULL;
 
     if (stats_fd == -1) {
@@ -4746,7 +4821,7 @@ static void query_stats_vcpu(CPUState *cpu, StatsArgs *kvm_stats_args)
 
 static void query_stats_schema_vcpu(CPUState *cpu, StatsArgs *kvm_stats_args)
 {
-    int stats_fd = cpu->kvm_vcpu_stats_fd;
+    int stats_fd = cpu_active_kvm_plane(cpu)->kvm_vcpu_stats_fd;
     Error *local_err = NULL;
 
     if (stats_fd == -1) {
