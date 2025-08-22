@@ -423,7 +423,7 @@ static int qigvm_directive_vp_context(QIgvm *ctx, const uint8_t *header_data,
      * Complete any other page processing first to ensure measurements
      * are correct.
      */
-    if (ctx->machine_state->cgs) {
+    if (ctx->machine_state->cgs && !ctx->only_vp_context) {
         if (qigvm_process_mem_page(ctx, NULL, errp)) {
             return -1;
         }
@@ -442,18 +442,27 @@ static int qigvm_directive_vp_context(QIgvm *ctx, const uint8_t *header_data,
     data = (uint8_t *)igvm_get_buffer(ctx->file, data_handle);
 
     if (ctx->machine_state->cgs) {
-        region = qigvm_prepare_memory(ctx, vp_context->gpa, IGVM_PAGE_SIZE_4K,
+        if (ctx->only_vp_context) {
+            result = ctx->cgsc->set_guest_state(
+                vp_context->gpa, data, data_size,
+                CGS_PAGE_TYPE_VMSA, vp_context->vp_index, errp);
+        } else {
+            region = qigvm_prepare_memory(ctx, vp_context->gpa, IGVM_PAGE_SIZE_4K,
                                     ctx->current_header_index, errp);
-        if (!region) {
-            return -1;
+
+            if (!region) {
+                igvm_free_buffer(ctx->file, data_handle);
+                return -1;
+            }
+
+            memset(region, 0, IGVM_PAGE_SIZE_4K);
+
+            memcpy(region, data, data_size);
+
+            result = ctx->cgsc->set_guest_state(
+                vp_context->gpa, region, IGVM_PAGE_SIZE_4K,
+                CGS_PAGE_TYPE_VMSA, vp_context->vp_index, errp);
         }
-        memset(region, 0, IGVM_PAGE_SIZE_4K);
-
-        memcpy(region, data, data_size);
-
-        result = ctx->cgsc->set_guest_state(
-            vp_context->gpa, region, IGVM_PAGE_SIZE_4K,
-            CGS_PAGE_TYPE_VMSA, vp_context->vp_index, errp);
     } else if (target_arch() == SYS_EMU_TARGET_X86_64) {
         result = qigvm_x86_set_vp_context(data, vp_context->vp_index, errp);
     } else {
@@ -908,6 +917,7 @@ int qigvm_process_file(IgvmCfg *cfg, MachineState *machine_state,
         return -1;
     }
     ctx.file = cfg->file;
+    ctx.only_vp_context = onlyVpContext;
     trace_igvm_process_file(cfg->file, onlyVpContext);
 
     ctx.machine_state = machine_state;
