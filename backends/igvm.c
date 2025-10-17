@@ -91,6 +91,9 @@ typedef struct QIgvm {
     unsigned region_last_index;
     unsigned region_page_count;
     bool only_vp_context;
+
+    void *fdt;
+    uint32_t fdt_size;
 } QIgvm;
 
 static int qigvm_directive_page_data(QIgvm *ctx, const uint8_t *header_data,
@@ -105,6 +108,8 @@ static int qigvm_directive_parameter_insert(QIgvm *ctx,
                                             Error **errp);
 static int qigvm_directive_memory_map(QIgvm *ctx, const uint8_t *header_data,
                                       Error **errp);
+static int qigvm_directive_device_tree(QIgvm *ctx, const uint8_t *header_data,
+                                       Error **errp);
 static int qigvm_directive_vp_count(QIgvm *ctx, const uint8_t *header_data,
                                     Error **errp);
 static int qigvm_directive_environment_info(QIgvm *ctx,
@@ -140,6 +145,8 @@ static struct QIGVMHandler handlers[] = {
       qigvm_directive_vp_count },
     { IGVM_VHT_ENVIRONMENT_INFO_PARAMETER, IGVM_HEADER_SECTION_DIRECTIVE,
       qigvm_directive_environment_info },
+    { IGVM_VHT_DEVICE_TREE, IGVM_HEADER_SECTION_DIRECTIVE,
+      qigvm_directive_device_tree },
     { IGVM_VHT_REQUIRED_MEMORY, IGVM_HEADER_SECTION_DIRECTIVE,
       qigvm_directive_required_memory },
     { IGVM_VHT_SNP_ID_BLOCK, IGVM_HEADER_SECTION_DIRECTIVE,
@@ -404,6 +411,33 @@ static int qigvm_process_mem_page(QIgvm *ctx,
             }
             ctx->region_page_count = 0;
         }
+    }
+    return 0;
+}
+
+static int qigvm_directive_device_tree(QIgvm *ctx, const uint8_t *header_data, Error **errp)
+{
+
+    const IGVM_VHS_PARAMETER *param = (const IGVM_VHS_PARAMETER *)header_data;
+    QIgvmParameterData *param_entry;
+
+    /* Find the parameter area that should hold the device tree */
+    QTAILQ_FOREACH(param_entry, &ctx->parameter_data, next)
+    {
+        if (param_entry->index == param->parameter_area_index) {
+
+            if (ctx->fdt_size > param_entry->size) {
+                error_setg(
+                    errp,
+                    "IGVM: device tree size exceeds parameter area defined in IGVM file");
+                return -1;
+            }
+
+            memcpy(param_entry->data, ctx->fdt, ctx->fdt_size);
+
+            break;
+        }
+
     }
     return 0;
 }
@@ -915,7 +949,7 @@ static IgvmHandle qigvm_file_init(char *filename, Error **errp)
     return igvm;
 }
 
-int qigvm_process_file(IgvmCfg *cfg, ConfidentialGuestSupport *cgs,
+int qigvm_process_file(IgvmCfg *cfg, ConfidentialGuestSupport *cgs, void *fdt, uint32_t fdt_size,
                        bool onlyVpContext, Error **errp)
 {
     int32_t header_count;
@@ -929,6 +963,9 @@ int qigvm_process_file(IgvmCfg *cfg, ConfidentialGuestSupport *cgs,
     if (ctx.file < 0) {
         return -1;
     }
+
+    ctx.fdt = fdt;
+    ctx.fdt_size = fdt_size;
 
     /*
      * The ConfidentialGuestSupport object is optional and allows a confidential

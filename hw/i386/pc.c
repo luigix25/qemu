@@ -72,6 +72,8 @@
 #include "hw/xen/xen-bus.h"
 #endif
 
+#include "x86_dt_common.h"
+
 /*
  * Helper for setting model-id for CPU models that changed model-id
  * depending on QEMU versions up to QEMU 2.4.
@@ -625,6 +627,18 @@ void pc_machine_done(Notifier *notifier, void *data)
 
     pci_bus_add_fw_cfg_extra_pci_roots(x86ms->fw_cfg, pcms->pcibus,
                                        &error_abort);
+
+#if defined(CONFIG_IGVM)
+    MachineState *ms = MACHINE(x86ms);
+    dt_setup_x86(ms);
+    /* Apply guest state from IGVM if supplied */
+    if (x86ms->igvm) {
+        if (IGVM_CFG_GET_CLASS(x86ms->igvm)
+                ->process(x86ms->igvm, ms->cgs, ms->fdt, fdt_totalsize(ms->fdt), false, &error_fatal) < 0) {
+            g_assert_not_reached();
+        }
+    }
+#endif
 
     acpi_setup();
     if (x86ms->fw_cfg) {

@@ -14,6 +14,8 @@
 #include "hw/i386/sgx-epc.h"
 #include "hw/cxl/cxl.h"
 
+#include <libfdt.h>
+
 #define MAX_IDE_BUS 2
 
 /**
