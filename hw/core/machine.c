@@ -1706,11 +1706,11 @@ void machine_run_board_init(MachineState *machine, const char *mem_path, Error *
                                    "on", false);
     }
 
-    if (machine->device_plane >= accel_nr_planes(machine)) {
+    /*if (machine->device_plane >= accel_nr_planes(machine)) {
         error_report("Invalid plane specified: %d (highest supported plane: %d)",
                      machine->device_plane, accel_nr_planes(machine) - 1);
         exit(EXIT_FAILURE);
-    }
+    }*/
 
     accel_init_interfaces(ACCEL_GET_CLASS(machine->accelerator));
     machine_class->init(machine);
