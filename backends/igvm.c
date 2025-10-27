@@ -480,7 +480,7 @@ static int qigvm_directive_vp_context(QIgvm *ctx, const uint8_t *header_data,
         return -1;
     }
 
-    /* 
+    /*
      * Complete any other page processing first to ensure measurements
      * are correct.
      */
@@ -1004,6 +1004,32 @@ int qigvm_process_file(IgvmCfg *cfg, ConfidentialGuestSupport *cgs, void *fdt, u
             }
         }
     }
+
+    /* Fino a qui solo stato del processore con onlyVpContext (IGVM_VHT_VP_CONTEXT) */
+
+    //
+    // IGVM_VHT_PARAMETER_AREA alloca memoria nello context di igvm nello spazio di indirizzamento di qemu.
+    //
+    // device tree dovrebbe solamente copiare dentro la zona di memoria allocata
+    //
+    // IGVM_VHT_PARAMETER_INSERT crea (qigvm_prepare_memory)(se serve??) una zona di memoria; copia dalla parameter area nella memoria allocata; Setta i flags alla nuova area
+    //
+    // IGVM_VHT_PAGE_DATA copia dati dal file nella memoria del guest
+    //
+    // IGVM_VHT_MEMORY_MAP setta flag per la memoria nel contesto.
+    //
+    // IGVM_VHT_VP_CONTEXT (viene chiamato gia' da sev e setta i registri), dopo risetta i registri e copia i registri nella memoria del guest
+    //
+    // IGVM_VHT_VP_COUNT_PARAMETER setta solamente il numero di cpu nel contesto
+    //
+    // IGVM_VHT_ENVIRONMENT_INFO_PARAMETER setta un flag in una zona del contesto
+    //
+    // IGVM_VHT_REQUIRED_MEMORY alloca nel guest la memoria richiesta
+    //
+    // IGVM_VHT_SNP_ID_BLOCK roba di chiavi, setta delle chiavi nel contesto. Vengono poi usato da IGVM_VHT_GUEST_POLICY
+    //
+    // IGVM_VHT_GUEST_POLICY setta dei flag nel contesto viene usato in qigvm_handle_policy )
+
 
     /*
      * If only processing the VP context then we don't need to process
