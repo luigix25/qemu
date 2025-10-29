@@ -74,6 +74,11 @@ static void dt_add_virtio(MachineState *ms, VirtIOMMIOProxy *mmio)
     }
 
     uint8_t plane = object_property_get_int(OBJECT(dev), "plane", &error_fatal);
+
+    // Device is intended for guest usage
+    if(plane == ms->device_plane)
+        return;
+
     hwaddr base = dev->mmio[0].addr;
     hwaddr size = 512;
     //unsigned index = (base - VIRTIO_MMIO_BASE) / size;
@@ -97,6 +102,10 @@ static void dt_add_isa_serial(MachineState *ms, ISADevice *dev)
     uint32_t irq = object_property_get_int(OBJECT(dev), "irq", &error_fatal);
     hwaddr base = object_property_get_int(OBJECT(dev), "iobase", &error_fatal);
     uint8_t plane = object_property_get_int(OBJECT(dev), "plane", &error_fatal);
+
+    // Device is intended for guest usage
+    if(plane == ms->device_plane)
+        return;
 
     hwaddr size = 8;
     char *nodename;
