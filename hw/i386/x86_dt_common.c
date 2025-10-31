@@ -47,21 +47,6 @@
 
 static bool debug;
 
-static void dt_add_microvm_irq(MachineState *ms,
-                               const char *nodename, uint32_t irq)
-{
-    int index = 0;
-
-    if (irq >= IO_APIC_SECONDARY_IRQBASE) {
-        irq -= IO_APIC_SECONDARY_IRQBASE;
-        index++;
-    }
-
-    //qemu_fdt_setprop_cell(mms->fdt, nodename, "interrupt-parent",
-    //                      mms->ioapic_phandle[index]);
-    qemu_fdt_setprop_cells(ms->fdt, nodename, "interrupts", irq, 0);
-}
-
 static void dt_add_virtio(MachineState *ms, VirtIOMMIOProxy *mmio)
 {
     SysBusDevice *dev = SYS_BUS_DEVICE(mmio);
@@ -81,8 +66,6 @@ static void dt_add_virtio(MachineState *ms, VirtIOMMIOProxy *mmio)
 
     hwaddr base = dev->mmio[0].addr;
     hwaddr size = 512;
-    //unsigned index = (base - VIRTIO_MMIO_BASE) / size;
-    uint32_t irq = 0;//ms->virtio_irq_base + index;
 
     nodename = g_strdup_printf("/virtio_mmio@%" PRIx64, base);
     qemu_fdt_add_subnode(ms->fdt, nodename);
@@ -92,14 +75,12 @@ static void dt_add_virtio(MachineState *ms, VirtIOMMIOProxy *mmio)
 
     qemu_fdt_setprop_sized_cells(ms->fdt, nodename, "reg", 2, base, 2, size);
     qemu_fdt_setprop(ms->fdt, nodename, "dma-coherent", NULL, 0);
-    dt_add_microvm_irq(ms, nodename, irq);
     g_free(nodename);
 }
 
 static void dt_add_isa_serial(MachineState *ms, ISADevice *dev)
 {
     const char compat[] = "ns16550";
-    uint32_t irq = object_property_get_int(OBJECT(dev), "irq", &error_fatal);
     hwaddr base = object_property_get_int(OBJECT(dev), "iobase", &error_fatal);
     uint8_t plane = object_property_get_int(OBJECT(dev), "plane", &error_fatal);
 
@@ -115,8 +96,6 @@ static void dt_add_isa_serial(MachineState *ms, ISADevice *dev)
     qemu_fdt_setprop(ms->fdt, nodename, "compatible", compat, sizeof(compat));
     qemu_fdt_setprop_sized_cells(ms->fdt, nodename, "reg", 2, base, 2, size);
     qemu_fdt_setprop_cell(ms->fdt, nodename, "plane", plane);
-
-    dt_add_microvm_irq(ms, nodename, irq);
 
     //if (base == 0x3f8 /* com1 */) {
     //    qemu_fdt_setprop_string(ms->fdt, "/chosen", "stdout-path", nodename);
