@@ -34,6 +34,7 @@
 #include "hw/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "qom/object.h"
+#include "hw/boards.h"
 
 OBJECT_DECLARE_SIMPLE_TYPE(ISASerialState, ISA_SERIAL)
 
@@ -89,6 +90,30 @@ static void serial_isa_build_aml(AcpiDevAmlIf *adev, Aml *scope)
     ISASerialState *isa = ISA_SERIAL(adev);
     Aml *dev;
     Aml *crs;
+
+
+    MachineState *ms = current_machine;
+
+    //ISADevice *isadev = ISA_DEVICE(adev);
+
+    // Access parent DeviceState:
+    DeviceState *dev_state = DEVICE(adev);
+
+    uint8_t plane = object_property_get_int(OBJECT(dev_state), "plane", NULL);
+
+    fprintf(stderr,"build aml io addr 0x%x, machine-plane: %d dev %d\n",isa->iobase,ms->device_plane,plane);
+
+    //if(plane != ms->device_plane)
+    //    return;
+
+    if (isa->iobase != 0x3f8 && isa->iobase != 0x2f8){
+        fprintf(stderr,"Skip DSDT\n");
+        return;
+    }
+
+    fprintf(stderr,"Aggiungo a DSDT 0x%x\n",isa->iobase);
+
+    //QUI
 
     crs = aml_resource_template();
     aml_append(crs, aml_io(AML_DECODE16, isa->iobase, isa->iobase, 0x00, 0x08));
