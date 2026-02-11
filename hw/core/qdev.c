@@ -696,7 +696,7 @@ static void device_initfn(Object *obj)
     dev->instance_id_alias = -1;
     dev->realized = false;
     dev->allow_unplug_during_migration = false;
-    dev->plane = 0;
+    dev->plane = qdev_default_plane();
 
     QLIST_INIT(&dev->gpios);
     QLIST_INIT(&dev->clocks);
