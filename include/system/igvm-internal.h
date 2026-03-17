@@ -79,5 +79,7 @@ qigvm_find_param_entry(QIgvm *igvm, uint32_t parameter_area_index);
  *  IGVM parameter handlers
  */
 int qigvm_directive_madt(QIgvm *ctx, const uint8_t *header_data, Error **errp);
+int qigvm_directive_device_tree(QIgvm *ctx, const uint8_t *header_data,
+                                Error **errp);
 
 #endif
