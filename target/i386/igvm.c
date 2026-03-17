@@ -14,6 +14,7 @@
 #include "cpu.h"
 #include "hw/i386/e820_memory_layout.h"
 #include "hw/i386/acpi-build.h"
+#include "hw/i386/x86_dt_common.h"
 #include "system/igvm.h"
 #include "system/igvm-internal.h"
 
@@ -209,4 +210,40 @@ int qigvm_directive_madt(QIgvm *ctx, const uint8_t *header_data, Error **errp)
 
     g_array_free(madt, true);
     return result;
+}
+
+/*
+ * Process device tree IGVM parameter
+ */
+int qigvm_directive_device_tree(QIgvm *ctx, const uint8_t *header_data,
+                                Error **errp)
+{
+    const IGVM_VHS_PARAMETER *param = (const IGVM_VHS_PARAMETER *)header_data;
+    QIgvmParameterData *param_entry;
+    int fdt_size;
+
+    /* Find the parameter area that should hold the device tree data */
+    param_entry = qigvm_find_param_entry(ctx, param->parameter_area_index);
+    if (param_entry == NULL) {
+        return 0;
+    }
+
+    fdt_size = dt_setup_x86(ctx->machine_state);
+    if (fdt_size < 0) {
+        error_setg(
+            errp,
+            "IGVM: error during device tree generation");
+        return -1;
+    }
+
+    if (fdt_size > param_entry->size) {
+        error_setg(
+            errp,
+            "IGVM: device tree size exceeds parameter area defined in IGVM file");
+        return -1;
+    }
+
+    memcpy(param_entry->data, ctx->machine_state->fdt, fdt_size);
+
+    return 0;
 }
