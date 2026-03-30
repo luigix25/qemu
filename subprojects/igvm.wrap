@@ -1,0 +1,8 @@
+[wrap-git]
+url = https://github.com/microsoft/igvm.git
+revision = fc0fa3f55cde54e016a1169926ae39f9561aa8f7
+depth = 1
+patch_directory = igvm
+
+[provide]
+igvm = igvm_dep
