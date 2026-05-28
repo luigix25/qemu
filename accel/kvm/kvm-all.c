@@ -134,6 +134,7 @@ static int map_kvm_run(KVMState *s, CPUState *cpu, Error **errp);
 static int map_kvm_dirty_gfns(KVMState *s, CPUState *cpu, Error **errp);
 static int vcpu_unmap_regions(KVMState *s, CPUState *cpu);
 static void kvm_alloc_vcpu_plane(CPUState *cpu, unsigned plane_id, int kvm_fd);
+static int kvm_create_plane(KVMState *s, unsigned id);
 
 struct KVMResampleFd {
     int gsi;
@@ -2238,6 +2239,7 @@ void kvm_init_irq_routing(KVMState *s)
 
 void kvm_irqchip_commit_routes(KVMState *s)
 {
+    unsigned plane = qdev_default_plane();
     int ret;
 
     if (kvm_gsi_direct_mapping()) {
@@ -2250,7 +2252,7 @@ void kvm_irqchip_commit_routes(KVMState *s)
 
     s->irq_routes->flags = 0;
     trace_kvm_irqchip_commit_routes();
-    ret = kvm_vm_ioctl(s, KVM_SET_GSI_ROUTING, s->irq_routes);
+    ret = kvm_vm_plane_ioctl(s, plane, KVM_SET_GSI_ROUTING, s->irq_routes);
     assert(ret == 0);
 }
 
@@ -2667,6 +2669,8 @@ static int do_kvm_irqchip_create(KVMState *s)
 
 static void kvm_irqchip_create(KVMState *s)
 {
+    int device_plane = qdev_default_plane();
+
     assert(s->kernel_irqchip_split != ON_OFF_AUTO_AUTO);
 
     if (do_kvm_irqchip_create(s) < 0) {
@@ -2678,6 +2682,11 @@ static void kvm_irqchip_create(KVMState *s)
      */
     kvm_async_interrupts_allowed = true;
     kvm_halt_in_kernel_allowed = true;
+
+    /* Make sure irqchip target plane is known to KVM */
+    if (device_plane != 0) {
+        kvm_create_plane(s, device_plane);
+    }
 
     kvm_init_irq_routing(s);
 
