@@ -26,6 +26,11 @@ static const Property my_dev_props[] = {
                      qdev_prop_uint32, uint32_t),
 };
 
+uint8_t qdev_default_plane(void)
+{
+    return 0;
+}
+
 static void my_dev_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
