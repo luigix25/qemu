@@ -1171,6 +1171,7 @@ snp_page_type_to_str(int type)
 {
     switch (type) {
     case KVM_SEV_SNP_PAGE_TYPE_NORMAL: return "Normal";
+    case KVM_SEV_SNP_PAGE_TYPE_VMSA: return "VMSA";
     case KVM_SEV_SNP_PAGE_TYPE_ZERO: return "Zero";
     case KVM_SEV_SNP_PAGE_TYPE_UNMEASURED: return "Unmeasured";
     case KVM_SEV_SNP_PAGE_TYPE_SECRETS: return "Secrets";
@@ -2597,8 +2598,14 @@ static int cgs_set_guest_state(hwaddr gpa, uint8_t *ptr, uint64_t len,
                                  errp) < 0) {
             return -1;
         }
-        return sev_set_cpu_context(cpu_index, ptr, len, gpa, errp);
 
+        if (sev_snp_enabled() &&
+            kvm_vm_check_extension(kvm_state, KVM_CAP_SNP_DIRECT_VMSA)) {
+            return snp_launch_update_data(
+                    gpa, ptr, len, KVM_SEV_SNP_PAGE_TYPE_VMSA, errp);
+        } else {
+            return sev_set_cpu_context(cpu_index, ptr, len, gpa, errp);
+        }
     case CGS_PAGE_TYPE_UNMEASURED:
         if (sev_snp_enabled()) {
             return snp_launch_update_data(

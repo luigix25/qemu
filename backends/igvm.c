@@ -425,11 +425,23 @@ static int qigvm_directive_vp_context(QIgvm *ctx, const uint8_t *header_data,
     const IGVM_VHS_VP_CONTEXT *vp_context =
         (const IGVM_VHS_VP_CONTEXT *)header_data;
     IgvmHandle data_handle;
+    uint32_t data_size;
+    uint8_t *region;
     uint8_t *data;
     int result;
 
     if (!(vp_context->compatibility_mask & ctx->compatibility_mask)) {
         return 0;
+    }
+
+    /*
+     * Complete any other page processing first to ensure measurements
+     * are correct.
+     */
+    if (ctx->machine_state->cgs) {
+        if (qigvm_process_mem_page(ctx, NULL, errp)) {
+            return -1;
+        }
     }
 
     data_handle = igvm_get_header_data(ctx->file, IGVM_HEADER_SECTION_DIRECTIVE,
@@ -440,6 +452,21 @@ static int qigvm_directive_vp_context(QIgvm *ctx, const uint8_t *header_data,
         return -1;
     }
 
+    data_size = igvm_get_buffer_size(ctx->file, data_handle);
+    if (data_size != IGVM_PAGE_SIZE_4K) {
+        error_setg(errp, "IGVM: VP context data size %u not equal to page size",
+                   data_size);
+        result = -1;
+        goto exit;
+    }
+
+    if (vp_context->vp_index != 0) {
+        error_setg(errp, "IGVM: VP context vp_index set to %u - must be zero",
+                   vp_context->vp_index);
+        result = -1;
+        goto exit;
+    }
+
     data = (uint8_t *)igvm_get_buffer(ctx->file, data_handle);
     if (data == NULL) {
         error_setg(errp, "IGVM: No buffer for handle %d", data_handle);
@@ -448,9 +475,21 @@ static int qigvm_directive_vp_context(QIgvm *ctx, const uint8_t *header_data,
     }
 
     if (ctx->machine_state->cgs) {
+        if (!ctx->only_vp_context) {
+            region = qigvm_prepare_memory(ctx, vp_context->gpa, IGVM_PAGE_SIZE_4K,
+                    ctx->current_header_index, errp);
+            if (!region) {
+                result = -1;
+                goto exit;
+            }
+            memset(region, 0, IGVM_PAGE_SIZE_4K);
+            memcpy(region, data, data_size);
+        } else {
+            region = data;
+        }
         result = ctx->cgsc->set_guest_state(
-            vp_context->gpa, data, igvm_get_buffer_size(ctx->file, data_handle),
-            CGS_PAGE_TYPE_VMSA, vp_context->vp_index, errp);
+            vp_context->gpa, region, IGVM_PAGE_SIZE_4K,
+            CGS_PAGE_TYPE_VMSA, 0, errp);
     } else if (target_arch() == SYS_EMU_TARGET_X86_64) {
         result = qigvm_x86_set_vp_context(data, vp_context->vp_index, errp);
     } else {
@@ -911,6 +950,7 @@ int qigvm_process_file(IgvmCfg *cfg, MachineState *machine_state,
         return -1;
     }
     ctx.file = cfg->file;
+    ctx.only_vp_context = onlyVpContext;
     trace_igvm_process_file(cfg->file, onlyVpContext);
 
     ctx.machine_state = machine_state;
