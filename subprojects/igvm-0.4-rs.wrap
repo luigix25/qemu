@@ -1,0 +1,10 @@
+[wrap-file]
+directory = igvm-0.4.0
+source_url = https://crates.io/api/v1/crates/igvm/0.4.0/download
+source_filename = igvm-0.4.0.tar.gz
+source_hash = 67578b05ebcdfa1aa0fe13f77a13bdd7d87036128898a327f1bf8e7356cf09cd
+method = cargo
+patch_directory = igvm-0.4-rs
+
+# bump this version number on every change to meson.build or the patches:
+# v1
