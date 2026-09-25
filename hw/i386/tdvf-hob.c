@@ -89,7 +89,16 @@ static void tdvf_hob_add_memory_resources(TdxGuest *tdx, TdvfHob *hob)
 
 void tdvf_hob_create(TdxGuest *tdx, TdxFirmwareEntry *td_hob)
 {
-    TdvfHob hob = {
+    EFI_HOB_GENERIC_HEADER *last_hob;
+    EFI_HOB_HANDOFF_INFO_TABLE *hit;
+    TdvfHob hob;
+
+    /* There is no TD HOB when the firmware does not ask for one. */
+    if (!td_hob) {
+        return;
+    }
+
+    hob = (TdvfHob) {
         .hob_addr = td_hob->address,
         .size = td_hob->size,
         .ptr = td_hob->mem_ptr,
@@ -97,9 +106,6 @@ void tdvf_hob_create(TdxGuest *tdx, TdxFirmwareEntry *td_hob)
         .current = td_hob->mem_ptr,
         .end = td_hob->mem_ptr + td_hob->size,
     };
-
-    EFI_HOB_GENERIC_HEADER *last_hob;
-    EFI_HOB_HANDOFF_INFO_TABLE *hit;
 
     /* Note, Efi{Free}Memory{Bottom,Top} are ignored, leave 'em zeroed. */
     hit = tdvf_get_area(&hob, sizeof(*hit));
