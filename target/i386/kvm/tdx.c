@@ -1539,6 +1539,125 @@ static void tdx_guest_set_qgs(Object *obj, Visitor *v,
     tdx->qg_sock_addr = sock;
 }
 
+static bool tdx_check_support(ConfidentialGuestPlatformType platform,
+                              uint16_t platform_version, uint8_t highest_vtl,
+                              uint64_t shared_gpa_boundary)
+{
+    /*
+     * TD partitioning is not supported by KVM upstream, so no L2 VMs can be
+     * requested.  Accept TDP images regardless: the SVSM runs as the L1 TD.
+     */
+    return platform == CGS_PLATFORM_TDP;
+}
+
+static int tdx_set_guest_state(hwaddr gpa, uint8_t *ptr, uint64_t len,
+                                     ConfidentialGuestPageType memory_type,
+                                     uint16_t cpu_index, Error **errp)
+{
+    MachineState *ms = MACHINE(qdev_get_machine());
+    TdxGuest *tdx = TDX_GUEST(ms->cgs);
+    int ret = 1;
+
+    if (!is_tdx_vm()) {
+        error_setg(errp, "%s: attempt to configure guest memory, but TDX "
+                     "is not enabled", __func__);
+        goto out;
+    }
+
+    if (len > (uint64_t)UINT32_MAX) {
+        error_setg(errp, "%s: attempt to configure guest memory, but memory "
+                     "size is too large (0x%lx)", __func__, len);
+        goto out;
+    }
+
+    switch (memory_type) {
+        case CGS_PAGE_TYPE_NORMAL:
+        case CGS_PAGE_TYPE_ZERO:
+        case CGS_PAGE_TYPE_UNMEASURED: {
+            TdxFirmwareEntry entry = {
+                .data_offset = (uint64_t)ptr,
+                .data_len = len,
+                .address = (uint64_t)gpa,
+                .size = len,
+                .type = TDVF_SECTION_TYPE_BFV,
+                .attributes = 0,
+            };
+            ret = tdvf_add_metadata(&tdx->tdvf, &entry);
+            break;
+        }
+        case CGS_PAGE_TYPE_REQUIRED_MEMORY: {
+            TdxFirmwareEntry entry = {
+                .data_offset = 0,
+                .data_len = 0,
+                .address = (uint64_t)gpa,
+                .size = len,
+                .type = TDVF_SECTION_TYPE_TEMP_MEM,
+                .attributes = 0,
+            };
+            ret = tdvf_add_metadata(&tdx->tdvf, &entry);
+            break;
+        }
+        case CGS_PAGE_TYPE_VMSA:
+            error_setg(errp, "%s: attempt to configure initial VMSA, but SEV-ES "
+                        "is not supported", __func__);
+            goto out;
+
+        case CGS_PAGE_TYPE_SECRETS:
+            error_setg(errp, "%s: attempt to configure SECRETS page, but SEV "
+                        "is not supported", __func__);
+            goto out;
+
+        case CGS_PAGE_TYPE_CPUID:
+            error_setg(errp, "%s: attempt to configure CPUID page, but SEV-SNP "
+                        "is not supported", __func__);
+            goto out;
+
+        default:
+            error_setg(errp, "%s: attempt to configure an unknown page (%d)",
+                        __func__, memory_type);
+            goto out;
+    }
+    if (ret < 0) {
+        error_setg(errp, "%s: failed to update guest. gpa: %lX, type: %d",
+                   __func__, gpa, memory_type);
+    }
+out:
+    return ret;
+}
+
+static int tdx_get_mem_map_entry(int index,
+                                 ConfidentialGuestMemoryMapEntry *entry,
+                                 Error **errp)
+{
+    struct e820_entry *table;
+    int num_entries;
+
+    num_entries = e820_get_table(&table);
+    if ((index < 0) || (index >= num_entries)) {
+        return 1;
+    }
+    entry->gpa = table[index].address;
+    entry->size = table[index].length;
+    switch (table[index].type) {
+    case E820_RAM:
+        entry->type = CGS_MEM_RAM;
+        break;
+    case E820_RESERVED:
+        entry->type = CGS_MEM_RESERVED;
+        break;
+    case E820_ACPI:
+        entry->type = CGS_MEM_ACPI;
+        break;
+    case E820_NVS:
+        entry->type = CGS_MEM_NVS;
+        break;
+    case E820_UNUSABLE:
+        entry->type = CGS_MEM_UNUSABLE;
+        break;
+    }
+    return 0;
+}
+
 /* tdx guest */
 OBJECT_DEFINE_TYPE_WITH_INTERFACES(TdxGuest,
                                    tdx_guest,
@@ -1551,6 +1670,8 @@ OBJECT_DEFINE_TYPE_WITH_INTERFACES(TdxGuest,
 static void tdx_guest_init(Object *obj)
 {
     ConfidentialGuestSupport *cgs = CONFIDENTIAL_GUEST_SUPPORT(obj);
+    ConfidentialGuestSupportClass *cgsc =
+        CONFIDENTIAL_GUEST_SUPPORT_GET_CLASS(obj);
     TdxGuest *tdx = TDX_GUEST(obj);
 
     qemu_mutex_init(&tdx->lock);
@@ -1581,6 +1702,10 @@ static void tdx_guest_init(Object *obj)
     tdx->event_notify_apicid = -1;
     kvm_vmfd_add_change_notifier(&tdx_vmfd_change_notifier);
     qemu_register_resettable(obj);
+
+    cgsc->check_support = tdx_check_support;
+    cgsc->set_guest_state = tdx_set_guest_state;
+    cgsc->get_mem_map_entry = tdx_get_mem_map_entry;
 }
 
 static void tdx_guest_finalize(Object *obj)
