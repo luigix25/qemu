@@ -349,6 +349,11 @@ static void tdx_finalize_vm(Notifier *notifier, void *unused)
         case TDVF_SECTION_TYPE_BFV:
         case TDVF_SECTION_TYPE_CFV:
             entry->mem_ptr = tdvf->mem_ptr + entry->data_offset;
+            /*
+             * In IGVM mode these entries may land in RAM regions rather than
+             * in the TDVF flash region, so they have to be accepted too.
+             */
+            tdx_accept_ram_range(entry->address, entry->size);
             break;
         case TDVF_SECTION_TYPE_TD_HOB:
         case TDVF_SECTION_TYPE_TEMP_MEM:
@@ -380,12 +385,15 @@ static void tdx_finalize_vm(Notifier *notifier, void *unused)
     tdx_post_init_vcpus();
     tdx_init_fw_mem_region();
 
-    /*
-     * TDVF image has been copied into private region above via
-     * KVM_MEMORY_MAPPING. It becomes useless.
-     */
-    ram_block = tdx_guest->tdvf_mr->ram_block;
-    ram_block_discard_range(ram_block, 0, ram_block->max_length);
+    /* In IGVM mode there is no TDVF image. */
+    if (tdx_guest->tdvf_mr) {
+        /*
+         * TDVF image has been copied into private region above via
+         * KVM_MEMORY_MAPPING. It becomes useless.
+         */
+        ram_block = tdx_guest->tdvf_mr->ram_block;
+        ram_block_discard_range(ram_block, 0, ram_block->max_length);
+    }
 
     tdx_vm_ioctl(KVM_TDX_FINALIZE_VM, 0, NULL, &error_fatal);
     CONFIDENTIAL_GUEST_SUPPORT(tdx_guest)->ready = true;
