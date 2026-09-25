@@ -37,6 +37,7 @@
 #include "hw/block/flash.h"
 #include "system/kvm.h"
 #include "target/i386/sev.h"
+#include "target/i386/kvm/tdx.h"
 
 #define FLASH_SECTOR_SIZE 4096
 
@@ -217,6 +218,15 @@ void pc_system_firmware_init(PCMachineState *pcms,
     PCMachineClass *pcmc = PC_MACHINE_GET_CLASS(pcms);
     int i;
     BlockBackend *pflash_blk[ARRAY_SIZE(pcms->flash)];
+
+    /*
+     * In IGVM mode the firmware comes from the IGVM file rather than from a
+     * TDVF image, but the TDX firmware metadata still has to be initialized
+     * so that the IGVM directives can add entries to it.
+     */
+    if (X86_MACHINE(pcms)->igvm && is_tdx_vm()) {
+        tdx_initialize_igvm();
+    }
 
     if (!pcmc->pci_enabled) {
         /*

@@ -14,6 +14,11 @@ int tdx_parse_tdvf(void *flash_ptr, int size)
     return -EINVAL;
 }
 
+int tdx_initialize_igvm(void)
+{
+    return -EINVAL;
+}
+
 int tdx_handle_report_fatal_error(X86CPU *cpu, struct kvm_run *run)
 {
     return -EINVAL;
